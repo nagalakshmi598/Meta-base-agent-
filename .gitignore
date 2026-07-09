@@ -1,0 +1,29 @@
+# ── Secrets / env (NEVER commit) ──
+.env
+.env.*
+!.env.example
+
+# ── Dependencies ──
+node_modules/
+**/node_modules/
+
+# ── Build output ──
+dist/
+build/
+.vite/
+*.tsbuildinfo
+
+# ── Logs / runtime data ──
+logs/
+*.log
+npm-debug.log*
+yarn-error.log*
+
+# ── Editor / OS ──
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ── Local agent/session data (not app code) ──
+.claude/
