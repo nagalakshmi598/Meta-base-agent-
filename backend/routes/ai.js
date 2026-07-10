@@ -14,7 +14,7 @@ import {
   answerSavedQueriesQuestion,
   isForecastQuestion, extractSpecificFilter, buildIdMatchCondition,
   buildNameMatchCondition, pickStatusFieldName, findTimeField, parseTimestampMs,
-  classifyForecastCounts, computeForecast, humanizeDuration
+  classifyForecastCounts, computeForecast, humanizeDuration, withPercentages
 } from '../services/queryService.js';
 import { logQuery, getRecentLogs } from '../services/queryLogService.js';
 
@@ -38,36 +38,71 @@ function humanizeQueryError(raw) {
   return 'the database could not run the generated query';
 }
 
-// Compose a warm, human-agent-style forecast/ETA answer from the computed
-// numbers. Everything here is DETERMINISTIC — the counts and dates come from the
-// real query + rate math, never invented — so it's fast and can't hallucinate.
-function buildForecastAnswer(filter, b, fc, collectionName, timeField, nowMs) {
+// Compose a full, human-agent-style MIGRATION REPORT from the computed numbers.
+// Everything here is DETERMINISTIC — counts, percentages and dates come from the
+// real query + rate math, never invented. Includes: a per-status table with
+// percentages, a plain-English summary, the completion ETA, an optional
+// files-vs-folders split, and the collection(s) the data came from.
+export function buildReportAnswer({ filter, statusRows, buckets, fc, statusField, collectionName, timeField, fileFolder, otherCollections, queryStr }) {
   const label = filter.type === 'id' ? `workspace \`${filter.value}\`` : `**${filter.value}**`;
+  const total = buckets.total || 0;
+  const pctOf = n => (total > 0 ? Math.round((n / total) * 1000) / 10 : 0);
   const L = [];
-  L.push(`Here's exactly where ${label} stands right now:`);
-  L.push('');
-  L.push(`- ✅ **Processed / migrated:** ${b.processed.toLocaleString()}`);
-  L.push(`- ⏳ **Remaining (in progress + not yet processed):** ${b.remaining.toLocaleString()}`);
-  if (b.conflict > 0) L.push(`- ⚠️ **In conflict:** ${b.conflict.toLocaleString()}`);
-  if (b.failed > 0)   L.push(`- ❌ **Failed:** ${b.failed.toLocaleString()}`);
-  L.push(`- 📊 **Total items:** ${b.total.toLocaleString()}`);
+
+  L.push(`## Migration report — ${label}`);
   L.push('');
 
+  // Per-status table with counts + percentages (every real status value).
+  L.push(`| Status | Count | % of total |`);
+  L.push(`|---|---:|---:|`);
+  for (const r of statusRows) {
+    L.push(`| ${r.value ?? '(none)'} | ${r.count.toLocaleString('en-US')} | ${r.pct}% |`);
+  }
+  L.push(`| **Total** | **${total.toLocaleString('en-US')}** | **100%** |`);
+  L.push('');
+
+  // Plain-English summary grouped into the buckets the user asked about.
+  L.push(`**In summary:**`);
+  L.push(`- ✅ **Processed / migrated:** ${buckets.processed.toLocaleString('en-US')} (${pctOf(buckets.processed)}%)`);
+  L.push(`- ⏳ **Not processed:** ${buckets.notProcessed.toLocaleString('en-US')} (${pctOf(buckets.notProcessed)}%)`);
+  if (buckets.inProgress > 0) L.push(`- 🔄 **In progress:** ${buckets.inProgress.toLocaleString('en-US')} (${pctOf(buckets.inProgress)}%)`);
+  if (buckets.conflict > 0)   L.push(`- ⚠️ **Conflict:** ${buckets.conflict.toLocaleString('en-US')} (${pctOf(buckets.conflict)}%)`);
+  if (buckets.retry > 0)      L.push(`- 🔁 **Retry:** ${buckets.retry.toLocaleString('en-US')} (${pctOf(buckets.retry)}%)`);
+  if (buckets.failed > 0)     L.push(`- ❌ **Failed:** ${buckets.failed.toLocaleString('en-US')} (${pctOf(buckets.failed)}%)`);
+  L.push('');
+
+  // Files vs folders split, when the collection distinguishes them.
+  if (fileFolder && (fileFolder.files != null || fileFolder.folders != null)) {
+    L.push(`**By type:** 📄 Files: **${(fileFolder.files || 0).toLocaleString('en-US')}** · 📁 Folders: **${(fileFolder.folders || 0).toLocaleString('en-US')}**`);
+    L.push('');
+  }
+
+  // Completion estimate.
   if (fc.done) {
-    L.push(`🎉 **Everything has been processed for this workspace** — there's nothing left in the queue, so it's effectively **completed**.`);
+    L.push(`🎉 **Everything is processed** — there's nothing left in the queue, so this workspace is effectively **completed**.`);
   } else if (fc.ok) {
     const perDay = Math.max(1, Math.round(fc.perDay));
     const eta = humanizeDuration(fc.etaMs);
     const whenStr = new Date(fc.completionMs).toISOString().slice(0, 10);
-    const pct = b.total > 0 ? Math.round((b.processed / b.total) * 100) : 0;
-    L.push(`So far **${pct}%** is done. At the **current processing rate** — about **${perDay.toLocaleString()} items/day**${timeField ? ` (measured from the \`${timeField.name}\` timeline)` : ''} — the remaining **${b.remaining.toLocaleString()}** should finish in **${eta}**, roughly **${whenStr}**. At that point the workspace should flip to **completed**. ✅`);
-    L.push('');
-    L.push(`> ⓘ This is an **estimate** that assumes processing keeps up the same pace. If items are currently stuck, it may take longer — ask me again later and the estimate will sharpen as more items complete.`);
+    L.push(`**Estimated completion:** at the current rate of ~**${perDay.toLocaleString('en-US')} items/day**${timeField ? ` (from the \`${timeField.name}\` timeline)` : ''}, the remaining **${buckets.remaining.toLocaleString('en-US')}** should finish in **${eta}**, around **${whenStr}** — when the workspace should reach **completed**. ✅`);
+    L.push(`> ⓘ Estimate assumes a steady rate; if items are stuck it may take longer. It sharpens as more items complete.`);
   } else {
-    L.push(`I can confirm the counts above, but I **can't give a reliable completion date** yet because ${fc.reason}. Once some items finish processing (with timestamps), I'll be able to project when it'll be done.`);
+    L.push(`**Estimated completion:** I can't project a reliable date yet because ${fc.reason}.`);
   }
   L.push('');
-  L.push(`_Based on the \`${collectionName}\` collection._`);
+
+  // Provenance + the exact query, so the user can verify / re-run in Metabase.
+  L.push(`_Grouped by \`${statusField}\` in \`${collectionName}\`._`);
+  if (otherCollections && otherCollections.length) {
+    L.push(`_This workspace also has data in: ${otherCollections.map(o => `\`${o.name}\` (${o.total.toLocaleString('en-US')})`).join(', ')} — ask me to report on any of them._`);
+  }
+  if (queryStr) {
+    L.push('');
+    L.push('**MongoDB query used:**');
+    L.push('```json');
+    L.push(queryStr);
+    L.push('```');
+  }
   return L.join('\n');
 }
 
@@ -244,16 +279,23 @@ router.post('/query', requireAuth, async (req, res) => {
     return { ok: false, error: 'Query failed after retry', timedOut: true };
   };
 
-  // ═══ FORECAST / ETA — "for this wsid, when will the remaining data finish?" ═══
-  // Human-agent behaviour: report processed vs remaining, then PROJECT a
-  // completion date from the real processing rate. Only triggers for a forecast
-  // question that also names a specific workspace/user/id. Deterministic math —
-  // never invents a date. Falls through to the normal agent if it can't resolve.
-  if (isMongo && isForecastQuestion(question)) {
+  // ═══ MIGRATION REPORT — full status breakdown + %, ETA, files/folders, query ═══
+  // For a question about a SPECIFIC workspace/user/id that asks about migration
+  // status, counts, percentages, conflict/retry, or "when will it finish", give a
+  // complete report: every real status with count + %, a files-vs-folders split,
+  // an estimated completion date, the collection(s) involved, AND the exact
+  // MongoDB query used. Deterministic — counts/dates come from live queries, never
+  // invented. Falls through to the normal agent if it can't resolve a workspace.
+  const wantsReport = isForecastQuestion(question)
+    || /\b(report|percentage|percent|%|breakdown|summary|overall|status|how much|how many|migrat|processed|not[ _]?process|conflict|retry|retries|in[ _]?progress|remaining|pending|completed?)\b/i.test(question);
+  if (isMongo && wantsReport) {
     const filter = extractSpecificFilter(question);
     if (filter && ['id', 'workspace_name', 'user_name', 'email'].includes(filter.type)) {
       try {
-        const fcCands = getTopCollections(`${question} status migrated processed in progress`, schema, 8, scanData)
+        const ql = question.toLowerCase();
+        const wantsFolders = /\bfolders?\b/i.test(ql);
+        const wantsFiles = /\bfiles?\b/i.test(ql) && !wantsFolders;
+        const fcCands = getTopCollections(`${question} status migrated processed in progress conflict`, schema, 8, scanData)
           .map(t => enrichTableFields(t, scanData));
         // Probe each candidate in parallel: this id's docs grouped by status.
         const probed = await Promise.all(fcCands.map(async (cand) => {
@@ -263,17 +305,39 @@ router.post('/query', requireAuth, async (req, res) => {
           const idMatch = filter.type === 'id'
             ? buildIdMatchCondition(flds, filter.value, question)
             : buildNameMatchCondition(flds, filter.type, filter.value);
-          const pipeline = [{ '$match': idMatch }, { '$group': { '_id': `$${statusField}`, 'n': { '$sum': 1 } } }, { '$sort': { 'n': -1 } }];
+          // If the user asked specifically for files or folders, restrict to that
+          // type (FileFolderInfo mixes both via a `folder` boolean).
+          const folderF = flds.find(f => /^folder$/i.test(f.name));
+          const typeFilter = folderF ? (wantsFolders ? { [folderF.name]: true } : wantsFiles ? { [folderF.name]: false } : null) : null;
+          const matchStage = typeFilter ? { '$and': [idMatch, typeFilter] } : idMatch;
+          const pipeline = [{ '$match': matchStage }, { '$group': { '_id': `$${statusField}`, 'count': { '$sum': 1 } } }, { '$sort': { 'count': -1 } }];
           const r = await runNativeSafe(JSON.stringify(pipeline), cand.name);
           if (!r.ok || !(r.data?.rows?.length)) return null;
           const statusValues = r.data.rows.map(row => ({ value: row[0], count: Number(row[row.length - 1]) || 0 }));
           const total = statusValues.reduce((a, s) => a + s.count, 0);
-          return total > 0 ? { cand, statusField, statusValues, total, idMatch } : null;
+          return total > 0 ? { cand, statusField, statusValues, total, idMatch, folderF, queryStr: JSON.stringify(pipeline, null, 2) } : null;
         }));
-        // The collection with the MOST matching docs for this workspace wins.
-        const pick = probed.filter(Boolean).sort((a, b) => b.total - a.total)[0];
+        const valid = probed.filter(Boolean).sort((a, b) => b.total - a.total);
+        const pick = valid[0];
         if (pick) {
           const buckets = classifyForecastCounts(pick.statusValues);
+          const statusRows = withPercentages(pick.statusValues);
+
+          // Files vs folders split (unfiltered by type) when the collection knows.
+          let fileFolder = null;
+          if (pick.folderF) {
+            const fp = [{ '$match': pick.idMatch }, { '$group': { '_id': `$${pick.folderF.name}`, 'count': { '$sum': 1 } } }];
+            const fr = await runNativeSafe(JSON.stringify(fp), pick.cand.name);
+            if (fr.ok && fr.data?.rows?.length) {
+              fileFolder = { files: 0, folders: 0 };
+              for (const row of fr.data.rows) {
+                const isFolder = row[0] === true || String(row[0]).toLowerCase() === 'true';
+                if (isFolder) fileFolder.folders += Number(row[row.length - 1]) || 0;
+                else fileFolder.files += Number(row[row.length - 1]) || 0;
+              }
+            }
+          }
+
           // Measure the processing timeline for this workspace (min/max timestamp).
           let firstMs = null, lastMs = null;
           const timeField = findTimeField(pick.cand.fields || []);
@@ -288,18 +352,21 @@ router.post('/query', requireAuth, async (req, res) => {
               lastMs = parseTimestampMs(li >= 0 ? row[li] : null);
             }
           }
-          const nowMs = Date.now();
-          const fc = computeForecast({ processed: buckets.processed, remaining: buckets.remaining, firstMs, lastMs, nowMs });
-          const answer = buildForecastAnswer(filter, buckets, fc, pick.cand.name, timeField, nowMs);
-          console.log(`[Forecast] ${pick.cand.name}: processed=${buckets.processed} remaining=${buckets.remaining} ok=${fc.ok} done=${!!fc.done}`);
+          const fc = computeForecast({ processed: buckets.processed, remaining: buckets.remaining, firstMs, lastMs, nowMs: Date.now() });
+          const otherCollections = valid.slice(1, 4).map(v => ({ name: v.cand.name, total: v.total }));
+          const answer = buildReportAnswer({
+            filter, statusRows, buckets, fc, statusField: pick.statusField,
+            collectionName: pick.cand.name, timeField, fileFolder, otherCollections, queryStr: pick.queryStr
+          });
+          console.log(`[Report] ${pick.cand.name}: total=${buckets.total} processed=${buckets.processed} remaining=${buckets.remaining} eta_ok=${fc.ok}`);
           return res.json({
-            answer, mode: 'ai', query_type: 'forecast',
-            is_mongo: true, collection: pick.cand.name, tables_used: [pick.cand.name],
-            results: { cols: [{ name: 'status' }, { name: 'count' }], rows: pick.statusValues.map(s => [s.value, s.count]), row_count: pick.statusValues.length }
+            answer, mode: 'ai', query_type: 'report',
+            sql: pick.queryStr, is_mongo: true, collection: pick.cand.name, tables_used: [pick.cand.name],
+            results: { cols: [{ name: pick.statusField }, { name: 'count' }], rows: pick.statusValues.map(s => [s.value, s.count]), row_count: pick.statusValues.length }
           });
         }
       } catch (e) {
-        console.warn('[Forecast] failed, falling back to agent:', e.message);
+        console.warn('[Report] failed, falling back to agent:', e.message);
       }
     }
   }

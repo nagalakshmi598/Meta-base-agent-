@@ -544,7 +544,7 @@ export async function synthesizeAnswer(originalQuestion, parts, history = []) {
     else if (oneRow && oneRow.length === 2 && (typeof oneRow[1] === 'number' || /^\d+$/.test(String(oneRow[1])))) scalar = oneRow[1];
     if (p.intent === 'data_query' && scalar != null && (typeof scalar === 'number' || /^\d+$/.test(String(scalar)))) {
       const n = typeof scalar === 'number' ? scalar : parseInt(scalar, 10);
-      return `**${n.toLocaleString()}** — that's the exact count for _"${(originalQuestion || '').trim()}"_ (from the \`${p.collection}\` collection).\n\nAsk for a **breakdown** or the **conflict/failure reasons** if you'd like more detail.`;
+      return `**${n.toLocaleString('en-US')}** — that's the exact count for _"${(originalQuestion || '').trim()}"_ (from the \`${p.collection}\` collection).\n\nAsk for a **breakdown** or the **conflict/failure reasons** if you'd like more detail.`;
     }
   }
 
@@ -745,7 +745,7 @@ export async function interpretResults(question, queryInfo, metabaseResult) {
       const val = rows[0][0] ?? 0;
       const colName = (headers[0] || '').toLowerCase();
       if (/count|total|num|sum/i.test(colName) || typeof val === 'number') {
-        return `There are **${Number(val).toLocaleString()} records** in the **${subject}** collection.`;
+        return `There are **${Number(val).toLocaleString('en-US')} records** in the **${subject}** collection.`;
       }
       return `**Answer:** ${val}`;
     }

@@ -582,14 +582,31 @@ export function classifyForecastCounts(statusValues = []) {
   const INPROG  = /progress|processing|running|ongoing|migrating|transferring|moving|inprogress|started|active/;
   const CONFLICT = /conflict|duplicate|mismatch|collision/;
   const FAILED   = /fail|error|broken|exception|rejected|abort/;
+  const RETRY    = /retry|retries|retrying|reattempt|requeue/;
+  // Matches PROCESSED, VERSION_PROCESSED, TRANSFERRED, MIGRATED, DONE… but NOT
+  // the NOT_/VERSION_NOT_ variants (NOTPROC is checked first).
   const isProc   = v => /process|complet|success|migrat|transferr?ed|moved|copied|uploaded|synced|finish|\bdone\b/.test(v) && !NOTPROC.test(v);
   return {
     total,
     processed: sum(isProc),
-    remaining: sum(v => (NOTPROC.test(v) || INPROG.test(v)) && !isProc(v)),
+    // Everything still to finish: not-processed (incl. VERSION_NOT_PROCESSED),
+    // in-progress, and retry items.
+    remaining: sum(v => (NOTPROC.test(v) || INPROG.test(v) || RETRY.test(v)) && !isProc(v)),
+    inProgress: sum(v => INPROG.test(v) && !isProc(v)),
+    notProcessed: sum(v => NOTPROC.test(v) && !isProc(v)),
     conflict:  sum(v => CONFLICT.test(v)),
     failed:    sum(v => FAILED.test(v) && !CONFLICT.test(v)),
+    retry:     sum(v => RETRY.test(v)),
   };
+}
+
+// Attach a percentage-of-total to each status value, sorted by count desc.
+export function withPercentages(statusValues = []) {
+  const sv = Array.isArray(statusValues) ? statusValues : [];
+  const total = sv.reduce((a, s) => a + (Number(s.count) || 0), 0) || 1;
+  return sv
+    .map(s => ({ value: s.value, count: Number(s.count) || 0, pct: Math.round(((Number(s.count) || 0) / total) * 1000) / 10 }))
+    .sort((a, b) => b.count - a.count);
 }
 
 // Estimate completion time from processed count, remaining count, and the time
