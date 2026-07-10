@@ -38,6 +38,18 @@ function humanizeQueryError(raw) {
   return 'the database could not run the generated query';
 }
 
+// Run an async fn over items with a bounded concurrency (so we never fire a huge
+// burst of heavy MongoDB scans at once). Preserves input order in the result.
+async function mapLimit(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(Math.max(1, limit), items.length || 1) }, async () => {
+    while (next < items.length) { const i = next++; out[i] = await fn(items[i], i); }
+  });
+  await Promise.all(workers);
+  return out;
+}
+
 // Compose a full, human-agent-style MIGRATION REPORT from the computed numbers.
 // Everything here is DETERMINISTIC — counts, percentages and dates come from the
 // real query + rate math, never invented. Includes: a per-status table with
@@ -311,22 +323,27 @@ router.post('/query', requireAuth, async (req, res) => {
         const wantsFolders = /\bfolders?\b/i.test(ql);
         const wantsFiles = /\bfiles?\b/i.test(ql) && !wantsFolders;
         const typeScope = wantsFolders ? 'folders' : wantsFiles ? 'files' : null;
-        // Consider MORE candidates — a workspace's data spans many collections
-        // (files, folders, collaborations, conflicts…). We read EVERY one that
-        // actually holds this workspace's data, not just the biggest.
-        const fcCands = getTopCollections(`${question} status migrated processed in progress conflict files folders collaboration`, schema, 14, scanData)
+        // A workspace's data spans many collections (files, folders, collabs,
+        // conflicts…). We read every one that holds this workspace's data — but
+        // with BOUNDED CONCURRENCY and a TIME BUDGET so a burst of heavy unindexed
+        // scans can't time the request out.
+        const REPORT_BUDGET_MS = 75000;
+        const reportStart = Date.now();
+        const timeLeft = () => REPORT_BUDGET_MS - (Date.now() - reportStart);
+        // Prefer collections the scan shows actually have a status field + data,
+        // so we don't waste scans on unrelated collections.
+        const fcCands = getTopCollections(`${question} status migrated processed in progress conflict files folders collaboration`, schema, 10, scanData)
           .map(t => enrichTableFields(t, scanData));
         // Pass 1 — probe each candidate with the SAME simple $match + $group the
-        // user validated, in parallel. Keep every collection that has data.
-        const probed = await Promise.all(fcCands.map(async (cand) => {
+        // user validated, at most 4 at a time. Keep every collection with data.
+        const probed = await mapLimit(fcCands, 4, async (cand) => {
+          if (timeLeft() < 10000) return null; // stop starting new scans near the deadline
           const flds = cand.fields || [];
           const statusField = pickStatusFieldName(flds.map(f => f.name));
           if (!statusField) return null;
           const idMatch = filter.type === 'id'
             ? buildIdMatchCondition(flds, filter.value, question)
             : buildNameMatchCondition(flds, filter.type, filter.value);
-          // If the user asked specifically for files or folders, restrict to that
-          // type (FileFolderInfo mixes both via a `folder` boolean).
           const folderF = flds.find(f => /^folder$/i.test(f.name));
           const typeFilter = folderF ? (wantsFolders ? { [folderF.name]: true } : wantsFiles ? { [folderF.name]: false } : null) : null;
           const matchStage = typeFilter ? { '$and': [idMatch, typeFilter] } : idMatch;
@@ -340,12 +357,14 @@ router.post('/query', requireAuth, async (req, res) => {
             folderF: folderF?.name || null, timeFieldName: findTimeField(flds)?.name || null,
             queryStr: JSON.stringify(pipeline, null, 2),
           } : null;
-        }));
+        });
         const withData = probed.filter(Boolean).sort((a, b) => b.total - a.total);
         if (withData.length) {
-          // Pass 2 — for each collection WITH data, fetch its timeline (min/max
-          // timestamp) and, when un-scoped, its files/folders split, in parallel.
-          await Promise.all(withData.map(async (c) => {
+          // Pass 2 — timeline (for the ETA) + files/folders split, but only for the
+          // few BIGGEST collections (they drive the rate and the type split), and
+          // only while there's time budget left. Bounded concurrency.
+          const enrichTargets = withData.slice(0, 4).filter(() => timeLeft() > 12000);
+          await mapLimit(enrichTargets, 3, async (c) => {
             const jobs = [];
             if (c.timeFieldName) {
               jobs.push(runNativeSafe(JSON.stringify([{ '$match': c.idMatch }, { '$group': { '_id': null, 'first': { '$min': `$${c.timeFieldName}` }, 'last': { '$max': `$${c.timeFieldName}` } } }]), c.name).then(tr => {
@@ -356,7 +375,7 @@ router.post('/query', requireAuth, async (req, res) => {
                   c.firstMs = parseTimestampMs(fi >= 0 ? row[fi] : null);
                   c.lastMs = parseTimestampMs(li >= 0 ? row[li] : null);
                 }
-              }));
+              }).catch(() => {}));
             }
             if (c.folderF && !typeScope) {
               jobs.push(runNativeSafe(JSON.stringify([{ '$match': c.idMatch }, { '$group': { '_id': `$${c.folderF}`, 'count': { '$sum': 1 } } }]), c.name).then(fr => {
@@ -367,10 +386,10 @@ router.post('/query', requireAuth, async (req, res) => {
                     if (isFolder) c.folders += Number(row[row.length - 1]) || 0; else c.files += Number(row[row.length - 1]) || 0;
                   }
                 }
-              }));
+              }).catch(() => {}));
             }
             await Promise.all(jobs);
-          }));
+          });
           // MERGE status counts across ALL collections that hold this workspace.
           const mergedMap = new Map();
           for (const c of withData) for (const s of c.statusValues) mergedMap.set(String(s.value), (mergedMap.get(String(s.value)) || 0) + s.count);
