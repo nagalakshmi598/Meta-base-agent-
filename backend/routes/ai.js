@@ -43,13 +43,14 @@ function humanizeQueryError(raw) {
 // real query + rate math, never invented. Includes: a per-status table with
 // percentages, a plain-English summary, the completion ETA, an optional
 // files-vs-folders split, and the collection(s) the data came from.
-export function buildReportAnswer({ filter, statusRows, buckets, fc, statusField, collectionName, timeField, fileFolder, otherCollections, queryStr }) {
+export function buildReportAnswer({ filter, statusRows, buckets, fc, statusField, collectionName, timeField, fileFolder, otherCollections, queryStr, typeScope }) {
   const label = filter.type === 'id' ? `workspace \`${filter.value}\`` : `**${filter.value}**`;
   const total = buckets.total || 0;
   const pctOf = n => (total > 0 ? Math.round((n / total) * 1000) / 10 : 0);
   const L = [];
 
-  L.push(`## Migration report — ${label}`);
+  L.push(`## Migration report${typeScope ? ` — ${typeScope} only` : ''} — ${label}`);
+  if (typeScope) L.push(`_Counts below are for **${typeScope}** in this workspace._`);
   L.push('');
 
   // Per-status table with counts + percentages (every real status value).
@@ -71,10 +72,16 @@ export function buildReportAnswer({ filter, statusRows, buckets, fc, statusField
   if (buckets.failed > 0)     L.push(`- ❌ **Failed:** ${buckets.failed.toLocaleString('en-US')} (${pctOf(buckets.failed)}%)`);
   L.push('');
 
-  // Files vs folders split, when the collection distinguishes them.
-  if (fileFolder && (fileFolder.files != null || fileFolder.folders != null)) {
-    L.push(`**By type:** 📄 Files: **${(fileFolder.files || 0).toLocaleString('en-US')}** · 📁 Folders: **${(fileFolder.folders || 0).toLocaleString('en-US')}**`);
-    L.push('');
+  // Files vs folders split — only for an UN-scoped report (when scoped to files
+  // or folders the totals above are already that type, so a split would confuse).
+  // Also require the split to reconcile with the status total, so we never show
+  // two totals that don't add up.
+  if (!typeScope && fileFolder && (fileFolder.files != null || fileFolder.folders != null)) {
+    const split = (fileFolder.files || 0) + (fileFolder.folders || 0);
+    if (total > 0 && Math.abs(split - total) <= Math.max(5, total * 0.02)) {
+      L.push(`**By type:** 📄 Files: **${(fileFolder.files || 0).toLocaleString('en-US')}** · 📁 Folders: **${(fileFolder.folders || 0).toLocaleString('en-US')}**`);
+      L.push('');
+    }
   }
 
   // Completion estimate.
@@ -295,6 +302,7 @@ router.post('/query', requireAuth, async (req, res) => {
         const ql = question.toLowerCase();
         const wantsFolders = /\bfolders?\b/i.test(ql);
         const wantsFiles = /\bfiles?\b/i.test(ql) && !wantsFolders;
+        const typeScope = wantsFolders ? 'folders' : wantsFiles ? 'files' : null;
         const fcCands = getTopCollections(`${question} status migrated processed in progress conflict`, schema, 8, scanData)
           .map(t => enrichTableFields(t, scanData));
         // Probe each candidate in parallel: this id's docs grouped by status.
@@ -323,9 +331,10 @@ router.post('/query', requireAuth, async (req, res) => {
           const buckets = classifyForecastCounts(pick.statusValues);
           const statusRows = withPercentages(pick.statusValues);
 
-          // Files vs folders split (unfiltered by type) when the collection knows.
+          // Files vs folders split (unfiltered by type) when the collection knows
+          // AND the report isn't already scoped to one type.
           let fileFolder = null;
-          if (pick.folderF) {
+          if (pick.folderF && !typeScope) {
             const fp = [{ '$match': pick.idMatch }, { '$group': { '_id': `$${pick.folderF.name}`, 'count': { '$sum': 1 } } }];
             const fr = await runNativeSafe(JSON.stringify(fp), pick.cand.name);
             if (fr.ok && fr.data?.rows?.length) {
@@ -356,7 +365,7 @@ router.post('/query', requireAuth, async (req, res) => {
           const otherCollections = valid.slice(1, 4).map(v => ({ name: v.cand.name, total: v.total }));
           const answer = buildReportAnswer({
             filter, statusRows, buckets, fc, statusField: pick.statusField,
-            collectionName: pick.cand.name, timeField, fileFolder, otherCollections, queryStr: pick.queryStr
+            collectionName: pick.cand.name, timeField, fileFolder, otherCollections, queryStr: pick.queryStr, typeScope
           });
           console.log(`[Report] ${pick.cand.name}: total=${buckets.total} processed=${buckets.processed} remaining=${buckets.remaining} eta_ok=${fc.ok}`);
           return res.json({

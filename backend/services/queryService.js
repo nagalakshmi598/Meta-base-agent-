@@ -357,10 +357,21 @@ export function pickBestTable(question, schema) {
 
 // ── ID EXTRACTION HELPERS ─────────────────────────────────────────────────
 
+// Extract a 24-char MongoDB ObjectId even when the user glued it to the next
+// word (e.g. "...df198e23and how many" → "6a4f...e23"). We match exactly 24 hex
+// chars that are NOT preceded by another hex char and NOT followed by 8+ more
+// hex chars — so a real ObjectId is found whether or not it's space-separated,
+// while a longer hash (40+ hex) is not mistakenly truncated.
+export function extractObjectId(question) {
+  const strict = question.match(/\b([0-9a-f]{24})\b/i);      // clean, space-delimited
+  if (strict) return strict[1].toLowerCase();
+  const glued = question.match(/(?<![0-9a-f])([0-9a-f]{24})(?![0-9a-f]{8})/i); // glued to a word
+  return glued ? glued[1].toLowerCase() : null;
+}
+
 export function extractSpecificId(question) {
-  // MongoDB ObjectId: 24 lowercase hex chars
-  const m24 = question.match(/\b([0-9a-f]{24})\b/i);
-  if (m24) return m24[1].toLowerCase();
+  const oid = extractObjectId(question);
+  if (oid) return oid;
   // UUID
   const muuid = question.match(/\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/i);
   if (muuid) return muuid[1].toLowerCase();
@@ -374,9 +385,9 @@ export function extractSpecificId(question) {
 export function extractSpecificFilter(question) {
   const q = question.trim();
 
-  // 1. Hex / UUID / ObjectId (highest confidence)
-  const m24 = q.match(/\b([0-9a-f]{24})\b/i);
-  if (m24) return { type: 'id', value: m24[1].toLowerCase() };
+  // 1. Hex / UUID / ObjectId (highest confidence) — handles glued-to-word ids too
+  const oid = extractObjectId(q);
+  if (oid) return { type: 'id', value: oid };
   const muuid = q.match(/\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/i);
   if (muuid) return { type: 'id', value: muuid[1].toLowerCase() };
   const mhex = q.match(/\b([0-9a-f]{16,})\b/i);
