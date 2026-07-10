@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   Send, PanelLeftOpen, Bot, Database,
   Sparkles, AlertCircle, ChevronDown, Code2,
-  Mic, Paperclip, X
+  Mic, Paperclip, X, Share2, Trash2, History, Eye
 } from 'lucide-react';
 import { aiApi } from '../services/api';
 import type { Database as DB, Schema, Message } from '../types';
@@ -26,6 +26,11 @@ interface Props {
   onTruncateFrom?: (id: string) => void;
   onSuggestionsReady: (suggestions: string[]) => void;
   onQuestionFilled?: () => void;
+  onOpenShare?: () => void;
+  onOpenChats?: () => void;
+  onDeleteChat?: () => void;
+  readOnly?: boolean;      // viewing a chat shared by someone else
+  sharedByLabel?: string;  // owner email when read-only
 }
 
 const AI_EXAMPLES = [
@@ -49,7 +54,8 @@ const SQL_EXAMPLES = [
 export default function ChatInterface({
   selectedDb, schema, messages, sidebarOpen, aiEnabled,
   questionToFill, onToggleSidebar, onAddMessage, onUpdateMessage,
-  onTruncateFrom, onSuggestionsReady, onQuestionFilled
+  onTruncateFrom, onSuggestionsReady, onQuestionFilled,
+  onOpenShare, onOpenChats, onDeleteChat, readOnly, sharedByLabel
 }: Props) {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
@@ -337,7 +343,44 @@ export default function ChatInterface({
             <span className="text-gray-600 text-xs">{selectedDb.name}</span>
           </div>
         )}
+
+        {/* Chat actions — Chats / Share / Delete */}
+        <div className="ml-auto flex items-center gap-1.5">
+          <button
+            onClick={onOpenChats}
+            title="Your chats & chats shared with you"
+            className="flex items-center gap-1.5 text-gray-600 hover:text-[#0129ac] hover:bg-gray-100 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors"
+          >
+            <History size={15} /> Chats
+          </button>
+          {!readOnly && messages.length > 0 && (
+            <>
+              <button
+                onClick={onOpenShare}
+                title="Share this chat by link, email, or Teams"
+                className="flex items-center gap-1.5 text-white bg-[#0129ac] hover:bg-[#011f85] rounded-lg px-3 py-1.5 text-xs font-medium transition-colors"
+              >
+                <Share2 size={14} /> Share
+              </button>
+              <button
+                onClick={onDeleteChat}
+                title="Delete this chat"
+                className="flex items-center text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg p-1.5 transition-colors"
+              >
+                <Trash2 size={15} />
+              </button>
+            </>
+          )}
+        </div>
       </header>
+
+      {/* Read-only banner when viewing a shared chat */}
+      {readOnly && (
+        <div className="flex items-center gap-2 px-4 py-2 bg-amber-50 border-b border-amber-200 text-amber-800 text-xs">
+          <Eye size={13} />
+          You're viewing a shared chat{sharedByLabel ? <> from <b>{sharedByLabel}</b></> : ''} (read-only).
+        </div>
+      )}
 
       {/* Messages */}
       <div

@@ -1,9 +1,21 @@
 import { useState, useEffect, useCallback } from 'react';
-import { authApi, metabaseApi, aiApi, setSessionExpiredHandler } from './services/api';
+import { authApi, metabaseApi, aiApi, chatApi, setSessionExpiredHandler } from './services/api';
 import type { Database, Schema, Message, ConnectionState } from './types';
 import ConnectModal from './components/ConnectModal';
 import Sidebar from './components/Sidebar';
 import ChatInterface from './components/ChatInterface';
+import ShareModal from './components/ShareModal';
+import ChatsModal from './components/ChatsModal';
+
+// Rehydrate stored messages (timestamps come back as strings from JSON).
+function hydrate(msgs: any[]): Message[] {
+  return (msgs || []).map(m => ({ ...m, timestamp: new Date(m.timestamp || Date.now()) }));
+}
+// A short chat title from the first user question.
+function deriveTitle(msgs: Message[]): string {
+  const first = msgs.find(m => m.role === 'user' && m.content);
+  return (first?.content || 'Untitled chat').slice(0, 60);
+}
 
 export default function App() {
   const [connection, setConnection] = useState<ConnectionState>({
@@ -26,6 +38,14 @@ export default function App() {
   const [questionToFill, setQuestionToFill] = useState('');
   const [deepScanStatus, setDeepScanStatus] = useState<'idle' | 'scanning' | 'done'>('idle');
   const [deepScanInfo, setDeepScanInfo] = useState('');
+
+  // Chat persistence + sharing
+  const [currentChatId, setCurrentChatId] = useState<string | null>(null);
+  const [showShare, setShowShare] = useState(false);
+  const [showChats, setShowChats] = useState(false);
+  const [chatReadOnly, setChatReadOnly] = useState(false);   // viewing someone else's shared chat
+  const [chatOwner, setChatOwner] = useState<string>('');
+  const [pendingSharedToken, setPendingSharedToken] = useState<string | null>(null);
 
   const handleScanAll = useCallback(async () => {
     setDeepScanStatus('scanning');
@@ -117,6 +137,9 @@ export default function App() {
     setSchema(null);
     setMessages([]);
     setSuggestions([]);
+    setCurrentChatId(null);
+    setChatReadOnly(false);
+    setChatOwner('');
     setShowConnect(true);
   };
 
@@ -125,6 +148,9 @@ export default function App() {
     setSchema(null);
     setMessages([]);
     setSuggestions([]);
+    setCurrentChatId(null);
+    setChatReadOnly(false);
+    setChatOwner('');
     setScanStatus('idle');
     setScanCount(0);
     setSchemaLoading(true);
@@ -167,6 +193,79 @@ export default function App() {
       return i === -1 ? prev : prev.slice(0, i);
     });
   }, []);
+
+  // ── CHAT SAVE / SHARE / DELETE ──────────────────────────────────────────
+  // Persist the current conversation and return its id (used before sharing).
+  const ensureChatSaved = useCallback(async (): Promise<string> => {
+    const res = await chatApi.save({ id: currentChatId || undefined, title: deriveTitle(messages), messages });
+    setCurrentChatId(res.id);
+    return res.id;
+  }, [currentChatId, messages]);
+
+  // Auto-save my own conversations (not shared read-only views) so they appear
+  // in "Your chats". Debounced; reuses the same chat id once created.
+  useEffect(() => {
+    if (chatReadOnly) return;
+    const done = messages.length > 0 && !messages[messages.length - 1]?.loading;
+    const hasAssistant = messages.some(m => m.role === 'assistant');
+    if (!done || !hasAssistant) return;
+    const t = setTimeout(() => {
+      chatApi.save({ id: currentChatId || undefined, title: deriveTitle(messages), messages })
+        .then(res => { if (!currentChatId) setCurrentChatId(res.id); })
+        .catch(() => { /* saving is best-effort */ });
+    }, 1200);
+    return () => clearTimeout(t);
+  }, [messages, currentChatId, chatReadOnly]);
+
+  const handleDeleteChat = useCallback(async () => {
+    if (!window.confirm('Delete this chat? This removes it for everyone it was shared with and cannot be undone.')) return;
+    try { if (currentChatId) await chatApi.del(currentChatId); } catch { /* ignore */ }
+    setMessages([]);
+    setSuggestions([]);
+    setCurrentChatId(null);
+    setChatReadOnly(false);
+    setChatOwner('');
+  }, [currentChatId]);
+
+  // Load a chat (mine or shared with me) into the main view.
+  const handleOpenChat = useCallback(async (id: string) => {
+    try {
+      const { chat } = await chatApi.get(id);
+      setMessages(hydrate(chat.messages));
+      setCurrentChatId(chat.mine ? chat.id : null);   // only owner edits in place
+      setChatReadOnly(!chat.mine);
+      setChatOwner(chat.owner || '');
+      setShowChats(false);
+      setSuggestions([]);
+    } catch (e) {
+      console.error('Open chat failed:', e);
+    }
+  }, []);
+
+  // On first load, capture a ?shared=<token> link so we can open it after sign-in.
+  useEffect(() => {
+    try {
+      const t = new URLSearchParams(window.location.search).get('shared');
+      if (t) setPendingSharedToken(t);
+    } catch { /* ignore */ }
+  }, []);
+
+  // Once connected, open any pending shared-link chat (read-only if not ours).
+  useEffect(() => {
+    if (!connection.connected || !pendingSharedToken) return;
+    chatApi.getShared(pendingSharedToken)
+      .then(({ chat }) => {
+        setMessages(hydrate(chat.messages));
+        setChatReadOnly(!chat.mine);
+        setChatOwner(chat.owner || '');
+        setCurrentChatId(chat.mine ? chat.id : null);
+      })
+      .catch(err => console.warn('Shared chat load failed:', err.message))
+      .finally(() => {
+        setPendingSharedToken(null);
+        try { window.history.replaceState({}, '', window.location.pathname); } catch { /* ignore */ }
+      });
+  }, [connection.connected, pendingSharedToken]);
 
   return (
     <div style={{ display: 'flex', height: '100vh', background: '#ffffff', overflow: 'hidden' }}>
@@ -218,6 +317,11 @@ export default function App() {
             onUpdateMessage={updateMessage}
             onTruncateFrom={truncateFrom}
             onSuggestionsReady={setSuggestions}
+            onOpenShare={() => setShowShare(true)}
+            onOpenChats={() => setShowChats(true)}
+            onDeleteChat={handleDeleteChat}
+            readOnly={chatReadOnly}
+            sharedByLabel={chatOwner}
           />
         ) : (
           /* Fallback: visible button to open modal if it ever fails to show */
@@ -245,6 +349,16 @@ export default function App() {
           </div>
         )}
       </div>
+
+      {/* Share this chat (link / email / Teams) */}
+      {showShare && (
+        <ShareModal ensureSaved={ensureChatSaved} onClose={() => setShowShare(false)} />
+      )}
+
+      {/* Your chats + chats shared with you */}
+      {showChats && (
+        <ChatsModal onOpen={handleOpenChat} onClose={() => setShowChats(false)} />
+      )}
     </div>
   );
 }

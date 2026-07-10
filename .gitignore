@@ -19,6 +19,9 @@ logs/
 npm-debug.log*
 yarn-error.log*
 
+# ── Persisted app data (saved/shared chats) ──
+data/
+
 # ── Editor / OS ──
 .vscode/
 .idea/

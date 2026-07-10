@@ -39,8 +39,41 @@ export const authApi = {
     api.get('/auth/env-status', { timeout: 5000 }).then(r => r.data),
   disconnect: () =>
     api.post('/auth/disconnect').then(r => r.data),
-  status: () =>
+  status: (): Promise<{ connected: boolean; url: string | null; email: string | null; connectedAt: string | null }> =>
     api.get('/auth/status', { timeout: 5000 }).then(r => r.data)
+};
+
+export interface ChatSummary {
+  id: string;
+  title: string;
+  updatedAt: string;
+  createdAt: string;
+  owner: string;
+  mine: boolean;
+  messageCount: number;
+  sharedWith: string[];
+  hasLink: boolean;
+}
+
+export const chatApi = {
+  save: (payload: { id?: string; title?: string; messages: any[] }): Promise<{ id: string; title: string; updatedAt: string; owner: string }> =>
+    api.post('/chat/save', payload).then(r => r.data),
+  list: (): Promise<{ chats: ChatSummary[]; me: string }> =>
+    api.get('/chat/list').then(r => r.data),
+  get: (id: string, token?: string): Promise<{ chat: ChatSummary & { messages: any[]; readOnly?: boolean } }> =>
+    api.get(`/chat/${id}`, { params: token ? { token } : {} }).then(r => r.data),
+  getShared: (token: string): Promise<{ chat: ChatSummary & { messages: any[]; readOnly?: boolean } }> =>
+    api.get(`/chat/shared/${token}`).then(r => r.data),
+  shareLink: (id: string): Promise<{ token: string; url: string }> =>
+    api.post(`/chat/${id}/share-link`).then(r => r.data),
+  revokeLink: (id: string): Promise<{ ok: boolean }> =>
+    api.post(`/chat/${id}/revoke-link`).then(r => r.data),
+  shareEmails: (id: string, emails: string[]): Promise<{ sharedWith: string[]; token: string; url: string }> =>
+    api.post(`/chat/${id}/share-emails`, { emails }).then(r => r.data),
+  unshareEmail: (id: string, email: string): Promise<{ sharedWith: string[] }> =>
+    api.post(`/chat/${id}/unshare-email`, { email }).then(r => r.data),
+  del: (id: string): Promise<{ deleted: boolean }> =>
+    api.delete(`/chat/${id}`).then(r => r.data),
 };
 
 export const metabaseApi = {

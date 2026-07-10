@@ -136,6 +136,7 @@ router.get('/status', (req, res) => {
   res.json({
     connected: !!(req.session.metabaseToken),
     url: req.session.metabaseUrl || null,
+    email: req.session.metabaseEmail || null,
     connectedAt: req.session.connectedAt || null
   });
 });

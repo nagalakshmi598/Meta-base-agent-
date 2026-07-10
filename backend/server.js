@@ -7,6 +7,7 @@ import dotenv from 'dotenv';
 import authRoutes from './routes/auth.js';
 import metabaseRoutes from './routes/metabase.js';
 import aiRoutes from './routes/ai.js';
+import chatRoutes from './routes/chat.js';
 
 dotenv.config();
 
@@ -49,6 +50,7 @@ app.get('/api/health', (req, res) => {
 app.use('/api/auth', authRoutes);
 app.use('/api/metabase', metabaseRoutes);
 app.use('/api/ai', aiRoutes);
+app.use('/api/chat', chatRoutes);
 
 app.use((err, req, res, _next) => {
   console.error('Unhandled error:', err);
