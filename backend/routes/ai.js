@@ -43,17 +43,19 @@ function humanizeQueryError(raw) {
 // real query + rate math, never invented. Includes: a per-status table with
 // percentages, a plain-English summary, the completion ETA, an optional
 // files-vs-folders split, and the collection(s) the data came from.
-export function buildReportAnswer({ filter, statusRows, buckets, fc, statusField, collectionName, timeField, fileFolder, otherCollections, queryStr, typeScope }) {
+export function buildReportAnswer({ filter, statusRows, buckets, fc, statusField, perCollection, timeField, fileFolder, queryStr, typeScope }) {
   const label = filter.type === 'id' ? `workspace \`${filter.value}\`` : `**${filter.value}**`;
   const total = buckets.total || 0;
   const pctOf = n => (total > 0 ? Math.round((n / total) * 1000) / 10 : 0);
+  const cols = perCollection || [];
   const L = [];
 
   L.push(`## Migration report${typeScope ? ` — ${typeScope} only` : ''} — ${label}`);
-  if (typeScope) L.push(`_Counts below are for **${typeScope}** in this workspace._`);
+  if (cols.length > 1) L.push(`_Combined across **${cols.length} collections** that hold this workspace's data._`);
+  if (typeScope) L.push(`_Counts are for **${typeScope}** only._`);
   L.push('');
 
-  // Per-status table with counts + percentages (every real status value).
+  // Combined per-status table with counts + percentages (every real status value).
   L.push(`| Status | Count | % of total |`);
   L.push(`|---|---:|---:|`);
   for (const r of statusRows) {
@@ -72,16 +74,25 @@ export function buildReportAnswer({ filter, statusRows, buckets, fc, statusField
   if (buckets.failed > 0)     L.push(`- ❌ **Failed:** ${buckets.failed.toLocaleString('en-US')} (${pctOf(buckets.failed)}%)`);
   L.push('');
 
-  // Files vs folders split — only for an UN-scoped report (when scoped to files
-  // or folders the totals above are already that type, so a split would confuse).
-  // Also require the split to reconcile with the status total, so we never show
-  // two totals that don't add up.
+  // Files vs folders split — only for an UN-scoped report and only when it
+  // reconciles with the combined total, so two totals never disagree.
   if (!typeScope && fileFolder && (fileFolder.files != null || fileFolder.folders != null)) {
     const split = (fileFolder.files || 0) + (fileFolder.folders || 0);
     if (total > 0 && Math.abs(split - total) <= Math.max(5, total * 0.02)) {
       L.push(`**By type:** 📄 Files: **${(fileFolder.files || 0).toLocaleString('en-US')}** · 📁 Folders: **${(fileFolder.folders || 0).toLocaleString('en-US')}**`);
       L.push('');
     }
+  }
+
+  // Per-collection breakdown so every collection's contribution is visible.
+  if (cols.length > 1) {
+    L.push(`**By collection** (where this workspace's data lives):`);
+    L.push(`| Collection | Items | Processed | Not processed | Conflict |`);
+    L.push(`|---|---:|---:|---:|---:|`);
+    for (const c of cols) {
+      L.push(`| ${c.name} | ${c.buckets.total.toLocaleString('en-US')} | ${c.buckets.processed.toLocaleString('en-US')} | ${c.buckets.notProcessed.toLocaleString('en-US')} | ${c.buckets.conflict.toLocaleString('en-US')} |`);
+    }
+    L.push('');
   }
 
   // Completion estimate.
@@ -91,7 +102,7 @@ export function buildReportAnswer({ filter, statusRows, buckets, fc, statusField
     const perDay = Math.max(1, Math.round(fc.perDay));
     const eta = humanizeDuration(fc.etaMs);
     const whenStr = new Date(fc.completionMs).toISOString().slice(0, 10);
-    L.push(`**Estimated completion:** at the current rate of ~**${perDay.toLocaleString('en-US')} items/day**${timeField ? ` (from the \`${timeField.name}\` timeline)` : ''}, the remaining **${buckets.remaining.toLocaleString('en-US')}** should finish in **${eta}**, around **${whenStr}** — when the workspace should reach **completed**. ✅`);
+    L.push(`**Estimated completion:** at the current rate of ~**${perDay.toLocaleString('en-US')} items/day**${timeField ? ` (from the \`${timeField}\` timeline)` : ''}, the remaining **${buckets.remaining.toLocaleString('en-US')}** should finish in **${eta}**, around **${whenStr}** — when the workspace should reach **completed**. ✅`);
     L.push(`> ⓘ Estimate assumes a steady rate; if items are stuck it may take longer. It sharpens as more items complete.`);
   } else {
     L.push(`**Estimated completion:** I can't project a reliable date yet because ${fc.reason}.`);
@@ -99,13 +110,10 @@ export function buildReportAnswer({ filter, statusRows, buckets, fc, statusField
   L.push('');
 
   // Provenance + the exact query, so the user can verify / re-run in Metabase.
-  L.push(`_Grouped by \`${statusField}\` in \`${collectionName}\`._`);
-  if (otherCollections && otherCollections.length) {
-    L.push(`_This workspace also has data in: ${otherCollections.map(o => `\`${o.name}\` (${o.total.toLocaleString('en-US')})`).join(', ')} — ask me to report on any of them._`);
-  }
+  L.push(`_Grouped by \`${statusField}\` across: ${cols.map(c => `\`${c.name}\``).join(', ')}._`);
   if (queryStr) {
     L.push('');
-    L.push('**MongoDB query used:**');
+    L.push('**MongoDB query used** (run per collection):');
     L.push('```json');
     L.push(queryStr);
     L.push('```');
@@ -303,9 +311,13 @@ router.post('/query', requireAuth, async (req, res) => {
         const wantsFolders = /\bfolders?\b/i.test(ql);
         const wantsFiles = /\bfiles?\b/i.test(ql) && !wantsFolders;
         const typeScope = wantsFolders ? 'folders' : wantsFiles ? 'files' : null;
-        const fcCands = getTopCollections(`${question} status migrated processed in progress conflict`, schema, 8, scanData)
+        // Consider MORE candidates — a workspace's data spans many collections
+        // (files, folders, collaborations, conflicts…). We read EVERY one that
+        // actually holds this workspace's data, not just the biggest.
+        const fcCands = getTopCollections(`${question} status migrated processed in progress conflict files folders collaboration`, schema, 14, scanData)
           .map(t => enrichTableFields(t, scanData));
-        // Probe each candidate in parallel: this id's docs grouped by status.
+        // Pass 1 — probe each candidate with the SAME simple $match + $group the
+        // user validated, in parallel. Keep every collection that has data.
         const probed = await Promise.all(fcCands.map(async (cand) => {
           const flds = cand.fields || [];
           const statusField = pickStatusFieldName(flds.map(f => f.name));
@@ -323,55 +335,74 @@ router.post('/query', requireAuth, async (req, res) => {
           if (!r.ok || !(r.data?.rows?.length)) return null;
           const statusValues = r.data.rows.map(row => ({ value: row[0], count: Number(row[row.length - 1]) || 0 }));
           const total = statusValues.reduce((a, s) => a + s.count, 0);
-          return total > 0 ? { cand, statusField, statusValues, total, idMatch, folderF, queryStr: JSON.stringify(pipeline, null, 2) } : null;
+          return total > 0 ? {
+            name: cand.name, statusField, statusValues, total, idMatch, matchStage,
+            folderF: folderF?.name || null, timeFieldName: findTimeField(flds)?.name || null,
+            queryStr: JSON.stringify(pipeline, null, 2),
+          } : null;
         }));
-        const valid = probed.filter(Boolean).sort((a, b) => b.total - a.total);
-        const pick = valid[0];
-        if (pick) {
-          const buckets = classifyForecastCounts(pick.statusValues);
-          const statusRows = withPercentages(pick.statusValues);
+        const withData = probed.filter(Boolean).sort((a, b) => b.total - a.total);
+        if (withData.length) {
+          // Pass 2 — for each collection WITH data, fetch its timeline (min/max
+          // timestamp) and, when un-scoped, its files/folders split, in parallel.
+          await Promise.all(withData.map(async (c) => {
+            const jobs = [];
+            if (c.timeFieldName) {
+              jobs.push(runNativeSafe(JSON.stringify([{ '$match': c.idMatch }, { '$group': { '_id': null, 'first': { '$min': `$${c.timeFieldName}` }, 'last': { '$max': `$${c.timeFieldName}` } } }]), c.name).then(tr => {
+                if (tr.ok && tr.data?.rows?.length) {
+                  const cols = (tr.data.cols || []).map(x => x.name);
+                  const row = tr.data.rows[0];
+                  const fi = cols.indexOf('first'), li = cols.indexOf('last');
+                  c.firstMs = parseTimestampMs(fi >= 0 ? row[fi] : null);
+                  c.lastMs = parseTimestampMs(li >= 0 ? row[li] : null);
+                }
+              }));
+            }
+            if (c.folderF && !typeScope) {
+              jobs.push(runNativeSafe(JSON.stringify([{ '$match': c.idMatch }, { '$group': { '_id': `$${c.folderF}`, 'count': { '$sum': 1 } } }]), c.name).then(fr => {
+                if (fr.ok && fr.data?.rows?.length) {
+                  c.hasFolder = true; c.files = 0; c.folders = 0;
+                  for (const row of fr.data.rows) {
+                    const isFolder = row[0] === true || String(row[0]).toLowerCase() === 'true';
+                    if (isFolder) c.folders += Number(row[row.length - 1]) || 0; else c.files += Number(row[row.length - 1]) || 0;
+                  }
+                }
+              }));
+            }
+            await Promise.all(jobs);
+          }));
+          // MERGE status counts across ALL collections that hold this workspace.
+          const mergedMap = new Map();
+          for (const c of withData) for (const s of c.statusValues) mergedMap.set(String(s.value), (mergedMap.get(String(s.value)) || 0) + s.count);
+          const mergedStatusValues = [...mergedMap].map(([value, count]) => ({ value, count }));
+          const buckets = classifyForecastCounts(mergedStatusValues);
+          const statusRows = withPercentages(mergedStatusValues);
 
-          // Files vs folders split (unfiltered by type) when the collection knows
-          // AND the report isn't already scoped to one type.
+          // Merge the processing timeline across collections (global earliest/latest).
+          let firstMs = null, lastMs = null, timeField = null;
+          for (const c of withData) {
+            if (c.firstMs != null) { firstMs = firstMs == null ? c.firstMs : Math.min(firstMs, c.firstMs); timeField = timeField || c.timeFieldName; }
+            if (c.lastMs != null) lastMs = lastMs == null ? c.lastMs : Math.max(lastMs, c.lastMs);
+          }
+          // Files/folders split summed across collections that distinguish them.
           let fileFolder = null;
-          if (pick.folderF && !typeScope) {
-            const fp = [{ '$match': pick.idMatch }, { '$group': { '_id': `$${pick.folderF.name}`, 'count': { '$sum': 1 } } }];
-            const fr = await runNativeSafe(JSON.stringify(fp), pick.cand.name);
-            if (fr.ok && fr.data?.rows?.length) {
-              fileFolder = { files: 0, folders: 0 };
-              for (const row of fr.data.rows) {
-                const isFolder = row[0] === true || String(row[0]).toLowerCase() === 'true';
-                if (isFolder) fileFolder.folders += Number(row[row.length - 1]) || 0;
-                else fileFolder.files += Number(row[row.length - 1]) || 0;
-              }
-            }
+          if (!typeScope && withData.some(c => c.hasFolder)) {
+            fileFolder = { files: 0, folders: 0 };
+            for (const c of withData) { if (c.hasFolder) { fileFolder.files += c.files; fileFolder.folders += c.folders; } }
           }
 
-          // Measure the processing timeline for this workspace (min/max timestamp).
-          let firstMs = null, lastMs = null;
-          const timeField = findTimeField(pick.cand.fields || []);
-          if (timeField) {
-            const tp = [{ '$match': pick.idMatch }, { '$group': { '_id': null, 'first': { '$min': `$${timeField.name}` }, 'last': { '$max': `$${timeField.name}` } } }];
-            const tr = await runNativeSafe(JSON.stringify(tp), pick.cand.name);
-            if (tr.ok && tr.data?.rows?.length) {
-              const cols = (tr.data.cols || []).map(c => c.name);
-              const row = tr.data.rows[0];
-              const fi = cols.indexOf('first'), li = cols.indexOf('last');
-              firstMs = parseTimestampMs(fi >= 0 ? row[fi] : null);
-              lastMs = parseTimestampMs(li >= 0 ? row[li] : null);
-            }
-          }
           const fc = computeForecast({ processed: buckets.processed, remaining: buckets.remaining, firstMs, lastMs, nowMs: Date.now() });
-          const otherCollections = valid.slice(1, 4).map(v => ({ name: v.cand.name, total: v.total }));
+          const perCollection = withData.map(c => ({ name: c.name, total: c.total, buckets: classifyForecastCounts(c.statusValues) }));
           const answer = buildReportAnswer({
-            filter, statusRows, buckets, fc, statusField: pick.statusField,
-            collectionName: pick.cand.name, timeField, fileFolder, otherCollections, queryStr: pick.queryStr, typeScope
+            filter, statusRows, buckets, fc, statusField: withData[0].statusField,
+            perCollection, timeField, fileFolder, queryStr: withData[0].queryStr, typeScope
           });
-          console.log(`[Report] ${pick.cand.name}: total=${buckets.total} processed=${buckets.processed} remaining=${buckets.remaining} eta_ok=${fc.ok}`);
+          console.log(`[Report] ${withData.length} collections merged: total=${buckets.total} processed=${buckets.processed} remaining=${buckets.remaining} eta_ok=${fc.ok}`);
           return res.json({
             answer, mode: 'ai', query_type: 'report',
-            sql: pick.queryStr, is_mongo: true, collection: pick.cand.name, tables_used: [pick.cand.name],
-            results: { cols: [{ name: pick.statusField }, { name: 'count' }], rows: pick.statusValues.map(s => [s.value, s.count]), row_count: pick.statusValues.length }
+            sql: withData[0].queryStr, is_mongo: true, collection: withData[0].name,
+            tables_used: withData.map(c => c.name),
+            results: { cols: [{ name: withData[0].statusField }, { name: 'count' }], rows: mergedStatusValues.sort((a, b) => b.count - a.count).map(s => [s.value, s.count]), row_count: mergedStatusValues.length }
           });
         }
       } catch (e) {
