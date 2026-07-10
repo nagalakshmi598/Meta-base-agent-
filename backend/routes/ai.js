@@ -11,7 +11,10 @@ import {
   isSchemaListQuestion, isSchemaNavigationQuestion, answerSchemaNavigation,
   getScanData, enrichTableFields, getCatalog, setCatalog,
   answerCatalogQuestion, getSavedQueries, setSavedQueries,
-  answerSavedQueriesQuestion
+  answerSavedQueriesQuestion,
+  isForecastQuestion, extractSpecificFilter, buildIdMatchCondition,
+  buildNameMatchCondition, pickStatusFieldName, findTimeField, parseTimestampMs,
+  classifyForecastCounts, computeForecast, humanizeDuration
 } from '../services/queryService.js';
 import { logQuery, getRecentLogs } from '../services/queryLogService.js';
 
@@ -33,6 +36,39 @@ function humanizeQueryError(raw) {
   if (/not authorized|unauthorized|permission|forbidden/i.test(msg)) return 'the database rejected the query due to permissions';
   if (/parse|syntax|BadValue|invalid/i.test(msg))               return 'the generated query had a syntax problem';
   return 'the database could not run the generated query';
+}
+
+// Compose a warm, human-agent-style forecast/ETA answer from the computed
+// numbers. Everything here is DETERMINISTIC — the counts and dates come from the
+// real query + rate math, never invented — so it's fast and can't hallucinate.
+function buildForecastAnswer(filter, b, fc, collectionName, timeField, nowMs) {
+  const label = filter.type === 'id' ? `workspace \`${filter.value}\`` : `**${filter.value}**`;
+  const L = [];
+  L.push(`Here's exactly where ${label} stands right now:`);
+  L.push('');
+  L.push(`- ✅ **Processed / migrated:** ${b.processed.toLocaleString()}`);
+  L.push(`- ⏳ **Remaining (in progress + not yet processed):** ${b.remaining.toLocaleString()}`);
+  if (b.conflict > 0) L.push(`- ⚠️ **In conflict:** ${b.conflict.toLocaleString()}`);
+  if (b.failed > 0)   L.push(`- ❌ **Failed:** ${b.failed.toLocaleString()}`);
+  L.push(`- 📊 **Total items:** ${b.total.toLocaleString()}`);
+  L.push('');
+
+  if (fc.done) {
+    L.push(`🎉 **Everything has been processed for this workspace** — there's nothing left in the queue, so it's effectively **completed**.`);
+  } else if (fc.ok) {
+    const perDay = Math.max(1, Math.round(fc.perDay));
+    const eta = humanizeDuration(fc.etaMs);
+    const whenStr = new Date(fc.completionMs).toISOString().slice(0, 10);
+    const pct = b.total > 0 ? Math.round((b.processed / b.total) * 100) : 0;
+    L.push(`So far **${pct}%** is done. At the **current processing rate** — about **${perDay.toLocaleString()} items/day**${timeField ? ` (measured from the \`${timeField.name}\` timeline)` : ''} — the remaining **${b.remaining.toLocaleString()}** should finish in **${eta}**, roughly **${whenStr}**. At that point the workspace should flip to **completed**. ✅`);
+    L.push('');
+    L.push(`> ⓘ This is an **estimate** that assumes processing keeps up the same pace. If items are currently stuck, it may take longer — ask me again later and the estimate will sharpen as more items complete.`);
+  } else {
+    L.push(`I can confirm the counts above, but I **can't give a reliable completion date** yet because ${fc.reason}. Once some items finish processing (with timestamps), I'll be able to project when it'll be done.`);
+  }
+  L.push('');
+  L.push(`_Based on the \`${collectionName}\` collection._`);
+  return L.join('\n');
 }
 
 router.get('/config', (req, res) => {
@@ -207,6 +243,66 @@ router.post('/query', requireAuth, async (req, res) => {
     }
     return { ok: false, error: 'Query failed after retry', timedOut: true };
   };
+
+  // ═══ FORECAST / ETA — "for this wsid, when will the remaining data finish?" ═══
+  // Human-agent behaviour: report processed vs remaining, then PROJECT a
+  // completion date from the real processing rate. Only triggers for a forecast
+  // question that also names a specific workspace/user/id. Deterministic math —
+  // never invents a date. Falls through to the normal agent if it can't resolve.
+  if (isMongo && isForecastQuestion(question)) {
+    const filter = extractSpecificFilter(question);
+    if (filter && ['id', 'workspace_name', 'user_name', 'email'].includes(filter.type)) {
+      try {
+        const fcCands = getTopCollections(`${question} status migrated processed in progress`, schema, 8, scanData)
+          .map(t => enrichTableFields(t, scanData));
+        // Probe each candidate in parallel: this id's docs grouped by status.
+        const probed = await Promise.all(fcCands.map(async (cand) => {
+          const flds = cand.fields || [];
+          const statusField = pickStatusFieldName(flds.map(f => f.name));
+          if (!statusField) return null;
+          const idMatch = filter.type === 'id'
+            ? buildIdMatchCondition(flds, filter.value, question)
+            : buildNameMatchCondition(flds, filter.type, filter.value);
+          const pipeline = [{ '$match': idMatch }, { '$group': { '_id': `$${statusField}`, 'n': { '$sum': 1 } } }, { '$sort': { 'n': -1 } }];
+          const r = await runNativeSafe(JSON.stringify(pipeline), cand.name);
+          if (!r.ok || !(r.data?.rows?.length)) return null;
+          const statusValues = r.data.rows.map(row => ({ value: row[0], count: Number(row[row.length - 1]) || 0 }));
+          const total = statusValues.reduce((a, s) => a + s.count, 0);
+          return total > 0 ? { cand, statusField, statusValues, total, idMatch } : null;
+        }));
+        // The collection with the MOST matching docs for this workspace wins.
+        const pick = probed.filter(Boolean).sort((a, b) => b.total - a.total)[0];
+        if (pick) {
+          const buckets = classifyForecastCounts(pick.statusValues);
+          // Measure the processing timeline for this workspace (min/max timestamp).
+          let firstMs = null, lastMs = null;
+          const timeField = findTimeField(pick.cand.fields || []);
+          if (timeField) {
+            const tp = [{ '$match': pick.idMatch }, { '$group': { '_id': null, 'first': { '$min': `$${timeField.name}` }, 'last': { '$max': `$${timeField.name}` } } }];
+            const tr = await runNativeSafe(JSON.stringify(tp), pick.cand.name);
+            if (tr.ok && tr.data?.rows?.length) {
+              const cols = (tr.data.cols || []).map(c => c.name);
+              const row = tr.data.rows[0];
+              const fi = cols.indexOf('first'), li = cols.indexOf('last');
+              firstMs = parseTimestampMs(fi >= 0 ? row[fi] : null);
+              lastMs = parseTimestampMs(li >= 0 ? row[li] : null);
+            }
+          }
+          const nowMs = Date.now();
+          const fc = computeForecast({ processed: buckets.processed, remaining: buckets.remaining, firstMs, lastMs, nowMs });
+          const answer = buildForecastAnswer(filter, buckets, fc, pick.cand.name, timeField, nowMs);
+          console.log(`[Forecast] ${pick.cand.name}: processed=${buckets.processed} remaining=${buckets.remaining} ok=${fc.ok} done=${!!fc.done}`);
+          return res.json({
+            answer, mode: 'ai', query_type: 'forecast',
+            is_mongo: true, collection: pick.cand.name, tables_used: [pick.cand.name],
+            results: { cols: [{ name: 'status' }, { name: 'count' }], rows: pick.statusValues.map(s => [s.value, s.count]), row_count: pick.statusValues.length }
+          });
+        }
+      } catch (e) {
+        console.warn('[Forecast] failed, falling back to agent:', e.message);
+      }
+    }
+  }
 
   // ═══ SUPER AGENT (LLM + intents) — primary path when an LLM is available ═══
   if (isAIAvailable()) {

@@ -524,6 +524,109 @@ export function statusFilterRegex(question, filterValue = '') {
   return '';
 }
 
+// ── FORECAST / ETA (estimate when a migration will finish) ─────────────────
+
+// Is the user asking WHEN a migration will finish / how long is left / an ETA?
+export function isForecastQuestion(question) {
+  const q = (question || '').toLowerCase();
+  return (
+    /\b(when|how long|how many days|how much time|eta|estimate[d]?|estimation|expected|forecast|by when|time (left|remaining)|days (left|remaining)|finish|complete[d]?|completion)\b/.test(q) &&
+    /\b(migrat|process|remaining|left|pending|progress|stuck|finish|complete|done|data|messages?|files?|folders?|items?)\b/.test(q)
+  ) || /\bwhen will .* (finish|complete|be done|migrat|process)/.test(q)
+     || /\bhow long (until|till|to|before)\b/.test(q);
+}
+
+// Find the best timestamp field to measure processing time from. Prefers a
+// "processed/updated/completed" time (reflects real progress), then created/start,
+// then any generic date/time field.
+export function findTimeField(fields = []) {
+  const pick = re => fields.find(f => re.test(f.name));
+  return pick(/processed_?at|processed_?time|process_?time|processedon/i)
+      || pick(/updated_?at|updated_?time|modified_?time|last_?modified|modified_?at|updatedon|lastupdated/i)
+      || pick(/completed_?at|completed_?time|finished_?at|finish_?time|end_?time|end_?date|completedon/i)
+      || pick(/created_?at|created_?time|create_?time|start_?time|start_?date|createdon|createddate/i)
+      || pick(/timestamp|datetime|\bdate\b|\btime\b/i)
+      || null;
+}
+
+// Build a MongoDB $match that finds a document by an id VALUE across every
+// id-like field (workSpaceId, uniqueWorkSpaceId, messageMoveWorkSpaceId, jobId…)
+// plus the _id ObjectId — only the field that actually holds it matches.
+export function buildIdMatchCondition(fields = [], value, question = '') {
+  const is24hex = /^[0-9a-f]{24}$/i.test(value);
+  const idFields = fields.map(f => f.name).filter(n => /id$/i.test(n) && n.toLowerCase() !== '_id');
+  const conds = idFields.map(n => ({ [n]: value }));
+  if (is24hex) conds.push({ _id: { '$oid': value } });
+  if (!conds.length) conds.push({ [findMatchingIdField(fields, question) || '_id']: value });
+  return conds.length === 1 ? conds[0] : { '$or': conds };
+}
+
+// Parse a timestamp cell (ISO string, epoch seconds, or epoch ms) → epoch ms.
+export function parseTimestampMs(v) {
+  if (v == null || v === '') return null;
+  if (typeof v === 'number') return v < 1e12 ? v * 1000 : v; // seconds vs ms heuristic
+  if (/^\d+$/.test(String(v))) { const n = parseInt(v, 10); return n < 1e12 ? n * 1000 : n; }
+  const t = Date.parse(String(v));
+  return isNaN(t) ? null : t;
+}
+
+// From a collection's status breakdown ([{value,count}]) split the counts into
+// the buckets a forecast needs. Buckets may overlap slightly (e.g.
+// "PROCESSED_WITH_CONFLICTS" counts as both processed and conflict) — that's
+// intentional for reporting; the ETA only uses processed + remaining.
+export function classifyForecastCounts(statusValues = []) {
+  const sv = Array.isArray(statusValues) ? statusValues : [];
+  const total = sv.reduce((a, s) => a + (Number(s.count) || 0), 0);
+  const sum = pred => sv.filter(s => pred(String(s.value).toLowerCase())).reduce((a, s) => a + (Number(s.count) || 0), 0);
+  const NOTPROC = /not[ _]?process|unprocess|not[ _]?migrat|not[ _]?complet|not[ _]?done|pending|queued|todo|to[ _]?do|yet|notstarted|not[ _]?started/;
+  const INPROG  = /progress|processing|running|ongoing|migrating|transferring|moving|inprogress|started|active/;
+  const CONFLICT = /conflict|duplicate|mismatch|collision/;
+  const FAILED   = /fail|error|broken|exception|rejected|abort/;
+  const isProc   = v => /process|complet|success|migrat|transferr?ed|moved|copied|uploaded|synced|finish|\bdone\b/.test(v) && !NOTPROC.test(v);
+  return {
+    total,
+    processed: sum(isProc),
+    remaining: sum(v => (NOTPROC.test(v) || INPROG.test(v)) && !isProc(v)),
+    conflict:  sum(v => CONFLICT.test(v)),
+    failed:    sum(v => FAILED.test(v) && !CONFLICT.test(v)),
+  };
+}
+
+// Estimate completion time from processed count, remaining count, and the time
+// span over which the processed items were handled. Pure math — no guessing.
+//   processed  : items already done
+//   remaining  : items still to process (in-progress + not-processed)
+//   firstMs/lastMs : min/max processing timestamp (epoch ms) for this workspace
+//   nowMs      : current time (epoch ms)
+// Returns { ok, done, reason, perDay, etaMs, completionMs, elapsedMs }.
+export function computeForecast({ processed = 0, remaining = 0, firstMs = null, lastMs = null, nowMs = 0 }) {
+  if (remaining <= 0) return { ok: true, done: true };
+  if (processed <= 0) return { ok: false, reason: 'nothing has finished processing yet, so there is no rate to project from' };
+  const endRef = lastMs || nowMs;
+  const elapsedMs = (endRef && firstMs) ? (endRef - firstMs) : 0;
+  if (!elapsedMs || elapsedMs <= 0) return { ok: false, reason: 'there are no processing timestamps to measure a rate from' };
+  const ratePerMs = processed / elapsedMs;        // items per ms
+  if (!isFinite(ratePerMs) || ratePerMs <= 0) return { ok: false, reason: 'the processing rate could not be determined' };
+  const etaMs = remaining / ratePerMs;            // ms to clear the remaining items
+  return {
+    ok: true, done: false,
+    perDay: ratePerMs * 86400000,
+    etaMs,
+    completionMs: nowMs + etaMs,
+    elapsedMs,
+  };
+}
+
+// Human phrasing for a duration in ms → "3 days", "5 hours", "about 2 weeks".
+export function humanizeDuration(ms) {
+  if (ms == null || !isFinite(ms) || ms <= 0) return 'less than an hour';
+  const mins = ms / 60000, hours = ms / 3600000, days = ms / 86400000;
+  if (days >= 14) return `about ${Math.round(days / 7)} weeks`;
+  if (days >= 1)  return `about ${Math.round(days)} day${Math.round(days) !== 1 ? 's' : ''}`;
+  if (hours >= 1) return `about ${Math.round(hours)} hour${Math.round(hours) !== 1 ? 's' : ''}`;
+  return `about ${Math.max(1, Math.round(mins))} minute${Math.round(mins) !== 1 ? 's' : ''}`;
+}
+
 // ── SINGLE-TABLE QUERY BUILDER ─────────────────────────────────────────────
 // Builds a MongoDB pipeline OR SQL query for a SPECIFIC table.
 // `hints` (optional, from the LLM) makes intent robust to phrasing:
