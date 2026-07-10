@@ -231,25 +231,36 @@ router.post('/query', requireAuth, async (req, res) => {
             // collections until one has the record (e.g. an in-progress workspace
             // lives in MessageWorkSpace, not ConflictMessageWorkSpace).
             const isSpecific = /\b[0-9a-f]{16,}\b|[\w.+-]+@[\w-]+\.\w+|["'][^"']{2,}["']/i.test(scopeText);
-            // A specific record (esp. an _id) can live in ANY collection with no
-            // ranking signal, so search across ALL collections until one hits. The
-            // loop early-exits on the first match, and breaks on the first timeout
-            // (so a down DB never triggers a storm of queries).
-            const specificCap = Math.min((schema.tables || []).length, 140);
-            const cands = getTopCollections(scopeText, schema, isSpecific ? specificCap : 1, scanData)
-              .map(t => enrichTableFields(t, scanData));
-
-            // For a SPECIFIC workspace, the relevant data (its folders/messages/
-            // files) lives in the per-item collection with the MOST matching rows —
-            // NOT the first small summary/side collection. So for aggregate
-            // questions (how much migrated / status / why conflict) we don't stop at
-            // the first match; we pick the collection with the richest result:
-            //   • "why" questions  → the most genuine error REASONS
-            //   • count/status/how-much → the most total ITEMS (volume)
+            // Classify the operation FIRST — it decides how many collections to
+            // search.
             const opLower = (sq.operation || '').toLowerCase();
             const isWhyQ = opLower === 'why' || /\bwhy\b|reason|cause|went.*(conflict|fail)/i.test(opText);
-            const isAggQ = isWhyQ || ['count', 'breakdown'].includes(opLower)
-                        || /how much|how many|migrated|processed|progress|status|count|breakdown|total|tally/i.test(opText);
+            // A MIGRATION-VOLUME question ("how much migrated / processed / not
+            // processed / progress / conflict count …"). For these the real data
+            // lives in a per-ITEM detail collection (FileFolderInfo, MessageEachFiles),
+            // NOT the small summary table — so we scan the top handful and keep the
+            // collection with the RICHEST result (most items, or most real reasons).
+            //   NOTE: this is deliberately NOT plain "how many <entity>" counting —
+            //   "how many workspaces" must stay on the entity table (top-scored),
+            //   never jump to a bigger per-message collection.
+            const isVolumeQ = isWhyQ
+              || /how much|migrat|process|progress|conflict|pending|transferr?ed|uploaded|synced|not[ _]?done|remaining/i.test(opText);
+
+            // Candidate breadth:
+            //   • specific lookup (id/email/quoted name) → search the TOP-RANKED
+            //     collections only (not all 140). The scorer + real scan data rank
+            //     the collection that holds the record near the top whenever the
+            //     question names an entity ("messages", "wsid", "user"…), so a
+            //     capped, parallel search finds it in ~1–2s instead of scanning
+            //     every collection (which made it hang on "Thinking…").
+            //   • migration-volume / why → the top handful, then pick the RICHEST
+            //     result — so it isn't pinned to a single mis-ranked side-table;
+            //   • plain count / list / lookup → the single top collection (the
+            //     scorer is reliable when there's a clear entity).
+            const specificCap = Math.min((schema.tables || []).length, 24);
+            const candCount = isSpecific ? specificCap : (isVolumeQ ? 6 : 1);
+            const cands = getTopCollections(scopeText, schema, candCount, scanData)
+              .map(t => enrichTableFields(t, scanData));
             const scoreOf = (res) => {
               const rows = res?.data?.rows || [];
               if (isWhyQ) { // distinct real error reasons
@@ -269,8 +280,16 @@ router.post('/query', requireAuth, async (req, res) => {
             let best = null, bestQuery = null, bestColl = null, bestScore = 0;
             // LLM-classified operation hint → phrasing-robust query building.
             const hints = { operation: sq.operation, filterValue: sq.filter_value };
-            const BATCH = isSpecific ? 12 : 1;
+            const BATCH = isSpecific ? 12 : (isVolumeQ ? 6 : 1);
+            // Wall-clock budget so the search NEVER hangs. Once exceeded we stop
+            // and use the best/first result found so far → a fast, honest answer.
+            const searchStart = Date.now();
+            const SEARCH_BUDGET_MS = 18000;
             for (let i = 0; i < cands.length && !result; i += BATCH) {
+              if (Date.now() - searchStart > SEARCH_BUDGET_MS) {
+                console.log(`[Agent] search budget reached (${i}/${cands.length} scanned) — using best so far`);
+                break;
+              }
               const settled = await Promise.all(
                 cands.slice(i, i + BATCH).map(cand => {
                   const built = buildQueryForTable(opText, cand, schema.engine, hints);
@@ -284,7 +303,11 @@ router.post('/query', requireAuth, async (req, res) => {
               for (const s of valid) {
                 if (!firstResult) { firstResult = s.r; firstQuery = s.qStr; firstColl = s.coll; }
                 if (!(s.r.ok && (s.r.data?.rows?.length || 0) > 0)) continue;
-                if (isSpecific && isAggQ) {
+                if (isVolumeQ) {
+                  // Migration-volume/why: keep the collection with the richest
+                  // result (most real reasons, or most total items) — whether the
+                  // question is specific to one workspace or a generic "how much
+                  // migrated". Plain entity counts skip this and take top-scored.
                   const sc = scoreOf(s.r);
                   if (sc > bestScore) { best = s.r; bestQuery = s.qStr; bestColl = s.coll; bestScore = sc; }
                   if (sc >= EXIT) { result = s.r; queryStr = s.qStr; collection = s.coll; break; } // rich enough

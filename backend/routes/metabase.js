@@ -1,6 +1,6 @@
 import express from 'express';
 import { getClientFromSession } from '../services/metabaseService.js';
-import { setScanData, setCatalog, setScanProgress, getScanProgress } from '../services/queryService.js';
+import { setScanData, setCatalog, setScanProgress, getScanProgress, pickStatusFieldName } from '../services/queryService.js';
 
 const router = express.Router();
 
@@ -115,10 +115,20 @@ async function scanCollections(client, token, dbId, tableNames, isMongo, cacheKe
     const batch = tableList.slice(i, i + batchSize);
     const results = await Promise.all(batch.map(async (tableName) => {
       try {
-        const nativeQuery = isMongo
+        const sampleQuery = isMongo
           ? { query: JSON.stringify([{ '$limit': 5 }]), collection: tableName, template_tags: {} }
           : { query: `SELECT * FROM "${tableName}" LIMIT 5`, template_tags: {} };
-        const result = await client.post(token, '/api/dataset', { type: 'native', native: nativeQuery, database: dbId });
+        // The TRUE document count — read in PARALLEL with the sample so the agent
+        // knows each collection's real volume (a 6-doc side-table vs a 96,000-doc
+        // main table). Runs concurrently, so it adds little wall-clock. If the
+        // count times out we still keep the sample (docCount just stays unknown).
+        const countQuery = isMongo
+          ? { query: JSON.stringify([{ '$count': 'n' }]), collection: tableName, template_tags: {} }
+          : { query: `SELECT COUNT(*) AS n FROM "${tableName}"`, template_tags: {} };
+        const [result, countRes] = await Promise.all([
+          client.post(token, '/api/dataset', { type: 'native', native: sampleQuery, database: dbId }),
+          client.post(token, '/api/dataset', { type: 'native', native: countQuery, database: dbId }).catch(() => null),
+        ]);
         if (!result.error && result.data?.rows?.length > 0) {
           const cols = (result.data.cols || []).map(c => c.name);
           const rows = result.data.rows;
@@ -128,7 +138,40 @@ async function scanCollections(client, token, dbId, tableNames, isMongo, cacheKe
               .map(r => String(r[idx] ?? ''))
               .filter(v => v && v !== 'null' && v !== 'NULL' && v !== 'undefined' && v.length < 300);
           });
-          setScanData(cacheKey, tableName, { cols, sampleValues, rowCount: rows.length });
+          // Extract the real count (single scalar cell). undefined if it failed.
+          let docCount;
+          const cv = countRes && !countRes.error ? countRes.data?.rows?.[0]?.[0] : undefined;
+          if (typeof cv === 'number') docCount = cv;
+          else if (cv != null && /^\d+$/.test(String(cv))) docCount = parseInt(cv, 10);
+
+          // DEEP READ: capture the collection's REAL status vocabulary. From 5
+          // sample rows the agent can't see every status a collection uses, so it
+          // would fall back to a guessed regex ("process|complet|…") and miscount.
+          // Here we detect the actual status field and GROUP the whole collection
+          // by it — giving ground-truth distinct values + per-status counts. This
+          // is what lets "processed / conflict / not migrated" map to the exact
+          // value each collection really stores. One extra grouped query per
+          // collection, run in the background scan only.
+          const statusField = pickStatusFieldName(cols);
+          let statusValues; // [{ value, count }] sorted desc
+          if (statusField) {
+            try {
+              const groupQuery = isMongo
+                ? { query: JSON.stringify([
+                      { '$group': { '_id': `$${statusField}`, 'n': { '$sum': 1 } } },
+                      { '$sort': { 'n': -1 } }, { '$limit': 50 }
+                    ]), collection: tableName, template_tags: {} }
+                : { query: `SELECT "${statusField}" AS v, COUNT(*) AS n FROM "${tableName}" GROUP BY "${statusField}" ORDER BY n DESC LIMIT 50`, template_tags: {} };
+              const gRes = await client.post(token, '/api/dataset', { type: 'native', native: groupQuery, database: dbId }).catch(() => null);
+              if (gRes && !gRes.error && gRes.data?.rows?.length) {
+                statusValues = gRes.data.rows
+                  .map(r => ({ value: r[0], count: Number(r[1]) || 0 }))
+                  .filter(sv => sv.value != null && String(sv.value).trim() !== '');
+              }
+            } catch (e) { /* status grouping is best-effort — keep the rest */ }
+          }
+
+          setScanData(cacheKey, tableName, { cols, sampleValues, rowCount: rows.length, docCount, statusField, statusValues });
           return 1;
         }
       } catch (e) { /* transient Mongo timeout/error → skip, keep going */ }

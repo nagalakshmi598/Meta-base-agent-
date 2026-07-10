@@ -4,7 +4,7 @@ import {
   isMongoDB, getTopCollections, classifyDatabase,
   extractSpecificFilter, buildMongoQuery, buildKeywordSQL
 } from './queryService.js';
-import { searchDocs } from './docsService.js';
+import { searchDocs, searchDocsSemantic } from './docsService.js';
 dotenv.config();
 
 let _client = null;
@@ -374,8 +374,8 @@ function buildRichSchema(schema, scanData = new Map()) {
   let chars = 0;
   for (const t of tables) {
     const fieldNames = (t.fields || []).map(f => f.name);
-    let line = `• ${t.name} — fields: ${fieldNames.join(', ')}`;
     const scan = scanData.get?.(t.name);
+    let line = `• ${t.name}${typeof scan?.docCount === 'number' ? ` (${scan.docCount} docs)` : ''} — fields: ${fieldNames.join(', ')}`;
     if (scan?.sampleValues) {
       const samples = [];
       for (const [field, vals] of Object.entries(scan.sampleValues)) {
@@ -384,6 +384,13 @@ function buildRichSchema(schema, scanData = new Map()) {
         }
       }
       if (samples.length) line += `\n    e.g. ${samples.join(', ')}`;
+    }
+    // Ground-truth status vocabulary (real distinct values + counts from the deep
+    // scan). Lets the planner map ANY phrasing ("migrated"/"done"/"transferred")
+    // to the value this collection actually stores, and know the true breakdown.
+    if (scan?.statusField && Array.isArray(scan.statusValues) && scan.statusValues.length) {
+      const vals = scan.statusValues.slice(0, 12).map(sv => `${sv.value}=${sv.count}`).join(', ');
+      line += `\n    ${scan.statusField} values: ${vals}`;
     }
     if (chars + line.length > 8500) {
       lines.push(`…and ${tables.length - lines.length} more collections.`);
@@ -524,6 +531,23 @@ export async function synthesizeAnswer(originalQuestion, parts, history = []) {
     return `I couldn't retrieve any data for **"${originalQuestion}"** — the database query returned nothing or the connection timed out. Please try again in a moment, or rephrase your question. I won't guess at an answer without real data.`;
   }
 
+  // ── FAST PATH: a single scalar answer (e.g. a COUNT) needs no LLM to phrase ──
+  // "how many … migrated / processed / conflict" returns one number. Answer it
+  // instantly and skip the synthesis round-trip — this is the most common
+  // question and keeps it near-instant instead of adding an extra LLM call.
+  if (parts.length === 1) {
+    const p = parts[0];
+    const oneRow = p.rows && p.rows.length === 1 ? p.rows[0] : null;
+    // scalar = single cell, OR a grouped single row like [id, count] → take count
+    let scalar = null;
+    if (oneRow && oneRow.length === 1) scalar = oneRow[0];
+    else if (oneRow && oneRow.length === 2 && (typeof oneRow[1] === 'number' || /^\d+$/.test(String(oneRow[1])))) scalar = oneRow[1];
+    if (p.intent === 'data_query' && scalar != null && (typeof scalar === 'number' || /^\d+$/.test(String(scalar)))) {
+      const n = typeof scalar === 'number' ? scalar : parseInt(scalar, 10);
+      return `**${n.toLocaleString()}** — that's the exact count for _"${(originalQuestion || '').trim()}"_ (from the \`${p.collection}\` collection).\n\nAsk for a **breakdown** or the **conflict/failure reasons** if you'd like more detail.`;
+    }
+  }
+
   // LARGE LIST → render the FULL table deterministically. The LLM only receives
   // a sample, so it would silently truncate a long list. This guarantees the
   // user gets EVERY row they asked for (e.g. all 91 users, or all 1000).
@@ -601,7 +625,11 @@ WHEN THE DATA CONTAINS ERRORS / CONFLICT REASONS (e.g. a "why did it fail/confli
 // Retrieves the most relevant doc chunks and answers STRICTLY from them, with
 // citations. Returns null if no LLM, or a "not in docs" note if nothing matched.
 export async function answerFromDocs(question) {
-  const chunks = searchDocs(question, 4);
+  // Prefer SEMANTIC (vector) retrieval — matches paraphrases/synonyms. Falls back
+  // to keyword search when embeddings are unavailable or return nothing.
+  let chunks = null;
+  try { chunks = await searchDocsSemantic(question, 4); } catch { chunks = null; }
+  if (!chunks || !chunks.length) chunks = searchDocs(question, 4);
   if (!chunks.length) return null; // no relevant docs — caller falls back
   const ai = await client();
   if (!ai) {

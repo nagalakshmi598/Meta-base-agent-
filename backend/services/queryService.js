@@ -3,6 +3,61 @@ export function isMongoDB(schema) {
   return engine.includes('mongo');
 }
 
+// Pick the single field that best represents a collection's migration/status
+// state, from a plain list of column names. Used by the deep scan (to know which
+// field to GROUP for the real status vocabulary) and by the query builder. Most
+// specific names first (processStatus/transferStatus/…), then any "…status",
+// then a looser state/progress/stage match.
+export function pickStatusFieldName(cols = []) {
+  const names = (cols || []).map(c => (typeof c === 'string' ? c : c?.name)).filter(Boolean);
+  return (
+    names.find(n => /^(process_?status|migration_?status|transfer_?status|job_?status|move_?status|sync_?status|status|state)$/i.test(n)) ||
+    names.find(n => /status$/i.test(n)) ||
+    names.find(n => /status|state|progress|stage/i.test(n)) ||
+    null
+  );
+}
+
+// Given a collection's REAL status vocabulary (captured during the deep scan as
+// [{value,count}]) and the status the user asked about, return the EXACT stored
+// values that match — so we filter on ground-truth values instead of a guessed
+// regex. `intent` is 'processed' | 'not_processed' | 'conflict' | 'failed' |
+// 'active' | 'inactive'. Returns [] when nothing matches (caller then falls back
+// to the generic regex). This is what makes "how many processed / migrated /
+// not migrated / conflict" correct even when a collection uses its own wording
+// (TRANSFERRED, MOVED, DONE, REPLIES_CONFLICT, …).
+export function matchStatusValues(statusValues, intent) {
+  if (!Array.isArray(statusValues) || !statusValues.length || !intent) return [];
+  const has = (v, re) => re.test(String(v).toLowerCase());
+  const NOT_PROC = /not[ _]?process|unprocess|not[ _]?migrat|not[ _]?complet|not[ _]?done|pending|queued|inqueue|in[ _]?queue|todo|to[ _]?do|yet|remaining|waiting|skipped|notstarted|not[ _]?started/;
+  const PROC     = /process|complet|success|migrat|transferr?ed|moved|copied|uploaded|synced|finish|\bdone\b/;
+  const rules = {
+    not_processed: v => has(v, NOT_PROC),
+    processed:     v => has(v, PROC) && !has(v, NOT_PROC), // exclude NOT_PROCESSED
+    conflict:      v => has(v, /conflict|duplicate|mismatch|collision/),
+    failed:        v => has(v, /fail|error|broken|exception|rejected|abort/),
+    inactive:      v => has(v, /inactive|disabled|suspend|deactivat/),
+    active:        v => has(v, /\bactive\b|enabled/) && !has(v, /inactive|deactivat/),
+  };
+  const rule = rules[intent];
+  if (!rule) return [];
+  return statusValues.filter(sv => rule(sv.value)).map(sv => sv.value);
+}
+
+// Turn the free-text question + optional LLM filterValue into a canonical status
+// intent used by matchStatusValues(). Mirrors statusFilterRegex()'s ordering
+// (not-processed BEFORE processed). Returns '' when no status was requested.
+export function statusIntent(question, filterValue = '') {
+  const s = `${filterValue} ${question}`.toLowerCase();
+  if (/\bnot[ _]?process|unprocess|pending|not[ _]?migrat|did\s?n.?t migrat|not[ _]?complet|not[ _]?done|yet to|remaining|left to|queued|waiting/i.test(s)) return 'not_processed';
+  if (/process|migrat|complet|success|\bdone\b|finished|transferr?ed|moved|uploaded|synced/i.test(s)) return 'processed';
+  if (/conflict/i.test(s)) return 'conflict';
+  if (/fail|error|broken/i.test(s)) return 'failed';
+  if (/inactive|disabled|suspend/i.test(s)) return 'inactive';
+  if (/\bactive\b|enabled/i.test(s)) return 'active';
+  return '';
+}
+
 // ── SMART COLLECTION SCORING ───────────────────────────────────────────────
 
 export const SEMANTIC_CATEGORIES = [
@@ -217,7 +272,24 @@ function scoreSampleData(question, sampleData) {
       }
     }
   }
-  return Math.min(score, 60); // cap per-collection boost at 60
+
+  // GROUND-TRUTH STATUS MATCH: if the user asked about a specific status
+  // (processed / conflict / not migrated / failed / …) and this collection's REAL
+  // status vocabulary (captured during the deep scan) actually contains a value
+  // for that status, strongly prefer it — the answer lives where the status
+  // genuinely exists, not in a name-alike side-table that lacks those rows.
+  const intent = statusIntent(question);
+  if (intent && Array.isArray(sampleData.statusValues) && sampleData.statusValues.length) {
+    const hits = matchStatusValues(sampleData.statusValues, intent);
+    if (hits.length) {
+      const matched = sampleData.statusValues.filter(sv => hits.includes(sv.value));
+      const rows = matched.reduce((a, sv) => a + (sv.count || 0), 0);
+      score += 30;                       // this collection really has that status
+      if (rows >= 100) score += 15;      // …with meaningful volume
+    }
+  }
+
+  return Math.min(score, 110); // cap per-collection boost
 }
 
 // Return the top-N scored tables from the schema, boosted by real sample data
@@ -232,10 +304,21 @@ export function getTopCollections(question, schema, n = 5, scanData = new Map())
         // Prefer it over empty name-matching side-tables (e.g. ConflictFile*).
         score += 22;
         score += scoreSampleData(question, sd);
-        // Data-volume signal: a collection that filled the 5-row sample is likely
-        // the MAIN entity table; one with ≤1 row is a tiny snapshot/side-table.
-        if ((sd.rowCount || 0) >= 5) score += 18;
-        else if ((sd.rowCount || 0) <= 1) score -= 25;
+        // Data-volume signal. Prefer the TRUE document count (read during the
+        // scan) — a graded boost so a 96,000-doc main entity table decisively
+        // outranks a 6-doc side-table. Falls back to the 5-row sample size when
+        // the exact count wasn't captured (e.g. the count query timed out).
+        const dc = sd.docCount;
+        if (typeof dc === 'number') {
+          if (dc >= 1000)      score += 32;
+          else if (dc >= 100)  score += 22;
+          else if (dc >= 10)   score += 10;
+          else if (dc <= 1)    score -= 25;
+        } else if ((sd.rowCount || 0) >= 5) {
+          score += 18;
+        } else if ((sd.rowCount || 0) <= 1) {
+          score -= 25;
+        }
       }
       return { t, score };
     })
@@ -248,12 +331,23 @@ export function getTopCollections(question, schema, n = 5, scanData = new Map())
 // list from the scan cache (real column names read from sample rows) so the
 // query builder can find status/id/name fields.
 export function enrichTableFields(table, scanData) {
-  if (!table || (table.fields || []).length > 0) return table;
+  if (!table) return table;
   const scan = scanData?.get?.(table.name);
-  if (scan?.cols?.length) {
-    return { ...table, fields: scan.cols.map(name => ({ name })) };
+  let out = table;
+  // Backfill field list from the scanned column names when Metabase gave none.
+  if ((table.fields || []).length === 0 && scan?.cols?.length) {
+    out = { ...out, fields: scan.cols.map(name => ({ name })) };
   }
-  return table;
+  // Attach the collection's REAL status vocabulary + status field (captured by
+  // the deep scan) so the query builder can filter on ground-truth values
+  // instead of a guessed regex. Non-enumerable-ish extra props; harmless if absent.
+  if (scan && (scan.statusValues || scan.statusField)) {
+    if (out === table) out = { ...out };
+    out._statusValues = scan.statusValues;
+    out._statusField  = scan.statusField;
+    out._docCount     = scan.docCount;
+  }
+  return out;
 }
 
 export function pickBestTable(question, schema) {
@@ -518,11 +612,16 @@ export function buildQueryForTable(question, table, engine, hints = {}) {
       // The user asked about a SPECIFIC status ("how much PROCESSED / migrated",
       // "the NOT_PROCESSED ones", "failed", "conflict"). Filter to exactly that
       // status and COUNT it — so "processed" never returns not-processed data.
-      const sregex = statusFilterRegex(q, hints.filterValue);
-      const conds = [idMatch, { [statusField.name]: { '$regex': sregex, '$options': 'i' } }];
+      // Prefer EXACT status values from the collection's real vocabulary (captured
+      // by the deep scan) via $in; fall back to the guessed regex when unknown.
+      const exact = matchStatusValues(table._statusValues, statusIntent(q, hints.filterValue));
+      const statusCond = exact.length
+        ? { [statusField.name]: { '$in': exact } }
+        : { [statusField.name]: { '$regex': statusFilterRegex(q, hints.filterValue), '$options': 'i' } };
+      const conds = [idMatch, statusCond];
       if (typeFilter) conds.push(typeFilter);   // files-only or folders-only
       pipeline = [{ '$match': { '$and': conds } }, { '$count': 'total' }];
-      explanation = `Count of ${wantsFolders ? 'folders' : wantsFiles ? 'files' : 'items'} for ${type} "${value}" with status ~ "${sregex}"`;
+      explanation = `Count of ${wantsFolders ? 'folders' : wantsFiles ? 'files' : 'items'} for ${type} "${value}" with status ${exact.length ? `in [${exact.join(', ')}]` : `~ "${statusFilterRegex(q, hints.filterValue)}"`}`;
       queryType = 'aggregate';
     } else if ((isCount || isStatus || /how much|migrated|processed|progress/i.test(q)) && statusField) {
       // Generic "status of workspace X" (no specific status named) → full breakdown.
@@ -557,9 +656,35 @@ export function buildQueryForTable(question, table, engine, hints = {}) {
       // per-record "TotalMessage" field for "how many workspaces" gives wrong data.
       const wantsSum = /\b(sum|total number of|how many (messages|files|items|records processed))\b/i.test(q);
       const numericField = wantsSum && fields.find(f => /^(total|num|user_count|message_count|member_count|processedcount)/i.test(f.name));
+
+      // If the user named a STATUS ("how many PROCESSED / conflict / not migrated
+      // files"), COUNT only that status — not the whole collection. This is the
+      // "you gave me the entire count instead of the status I asked for" fix, now
+      // on the generic (no id/name) path too. Prefer exact scanned values.
+      const cIntent    = statusIntent(q, fval);
+      const cStatusF   = pickStatusFieldName((fields || []).map(f => f.name));
+      const cExact     = cIntent ? matchStatusValues(table._statusValues, cIntent) : [];
+      // Files-vs-folders discriminator (FileFolderInfo mixes both via `folder`).
+      const cFolderF   = fields.find(f => /^folder$/i.test(f.name));
+      const cWantsFold = /\bfolders?\b/i.test(q);
+      const cWantsFile = /\bfiles?\b/i.test(q) && !cWantsFold;
+      const cTypeCond  = cFolderF ? (cWantsFold ? { [cFolderF.name]: true } : cWantsFile ? { [cFolderF.name]: false } : null) : null;
+
       if (numericField) {
         pipeline = [{ "$group": { "_id": null, "total": { "$sum": `$${numericField.name}` } } }];
         explanation = `Sum of ${numericField.name} in ${table.name}`;
+      } else if (cIntent && cStatusF) {
+        const statusCond = cExact.length
+          ? { [cStatusF]: { '$in': cExact } }
+          : { [cStatusF]: { '$regex': statusFilterRegex(q, fval), '$options': 'i' } };
+        const conds = [statusCond];
+        if (cTypeCond) conds.push(cTypeCond);
+        pipeline = [{ '$match': conds.length === 1 ? conds[0] : { '$and': conds } }, { '$count': 'total' }];
+        explanation = `Count of ${cWantsFold ? 'folders' : cWantsFile ? 'files' : 'items'} in ${table.name} with ${cStatusF} ${cExact.length ? `in [${cExact.join(', ')}]` : `~ "${statusFilterRegex(q, fval)}"`}`;
+      } else if (cTypeCond) {
+        // "how many files/folders" (no status) → count just that type.
+        pipeline = [{ '$match': cTypeCond }, { '$count': 'total' }];
+        explanation = `Count of ${cWantsFold ? 'folders' : 'files'} in ${table.name}`;
       } else {
         pipeline = [{ "$count": "total" }];
         explanation = `Total documents in ${table.name}`;
@@ -585,25 +710,35 @@ export function buildQueryForTable(question, table, engine, hints = {}) {
       const statusField = fields.find(f => /^(processstatus|migrationstatus|jobstatus|status|state)$/i.test(f.name))
                        || fields.find(f => /status|state|progress|active/i.test(f.name));
       if (statusField) {
-        // Build the status-value regex. Prefer the LLM's filterValue (robust to
-        // phrasing — "the ones that didn't finish" → filterValue "failed"); else
-        // derive from keywords. Supports failed/conflict AND active/inactive/etc.
-        let terms = [];
-        if (fval) {
-          terms = [fval.replace(/[^a-z0-9]+/g, '')];        // e.g. "active", "failed", "conflict"
+        // Prefer EXACT status values from the collection's real vocabulary
+        // (captured by the deep scan) so we match what the collection actually
+        // stores. Fall back to a keyword-derived regex when the vocabulary
+        // wasn't captured.
+        const exact = matchStatusValues(table._statusValues, statusIntent(q, fval));
+        let matchCond, explainVal;
+        if (exact.length) {
+          matchCond = { [statusField.name]: { '$in': exact } };
+          explainVal = `in [${exact.join(', ')}]`;
         } else {
-          if (/fail|error|broken|issue|problem/i.test(q)) terms.push('fail', 'error');
-          if (/conflict/i.test(q)) terms.push('conflict');
-          if (/\binactive|disabled|suspended\b/i.test(q)) terms.push('inactive', 'disabled', 'suspended');
-          else if (/\bactive|enabled\b/i.test(q)) terms.push('active', 'enabled');
+          let terms = [];
+          if (fval) {
+            terms = [fval.replace(/[^a-z0-9]+/g, '')];        // e.g. "active", "failed", "conflict"
+          } else {
+            if (/fail|error|broken|issue|problem/i.test(q)) terms.push('fail', 'error');
+            if (/conflict/i.test(q)) terms.push('conflict');
+            if (/\binactive|disabled|suspended\b/i.test(q)) terms.push('inactive', 'disabled', 'suspended');
+            else if (/\bactive|enabled\b/i.test(q)) terms.push('active', 'enabled');
+          }
+          if (!terms.length) terms.push('fail', 'error', 'conflict');
+          const regex = [...new Set(terms.filter(Boolean))].join('|');
+          matchCond = { [statusField.name]: { '$regex': regex, '$options': 'i' } };
+          explainVal = `matches "${regex}"`;
         }
-        if (!terms.length) terms.push('fail', 'error', 'conflict');
-        const regex = [...new Set(terms.filter(Boolean))].join('|');
         pipeline = [
-          { "$match": { [statusField.name]: { "$regex": regex, "$options": "i" } } },
+          { "$match": matchCond },
           { "$limit": LIST_LIMIT }
         ];
-        explanation = `Records in ${table.name} where ${statusField.name} matches "${regex}"`;
+        explanation = `Records in ${table.name} where ${statusField.name} ${explainVal}`;
       } else {
         pipeline = [{ "$limit": LIST_LIMIT }];
         explanation = `Records from ${table.name}`;
