@@ -86,12 +86,16 @@ export function buildReportAnswer({ filter, statusRows, buckets, fc, statusField
   if (buckets.failed > 0)     L.push(`- ❌ **Failed:** ${buckets.failed.toLocaleString('en-US')} (${pctOf(buckets.failed)}%)`);
   L.push('');
 
-  // Files vs folders split — only for an UN-scoped report and only when it
-  // reconciles with the combined total, so two totals never disagree.
-  if (!typeScope && fileFolder && (fileFolder.files != null || fileFolder.folders != null)) {
-    const split = (fileFolder.files || 0) + (fileFolder.folders || 0);
-    if (total > 0 && Math.abs(split - total) <= Math.max(5, total * 0.02)) {
-      L.push(`**By type:** 📄 Files: **${(fileFolder.files || 0).toLocaleString('en-US')}** · 📁 Folders: **${(fileFolder.folders || 0).toLocaleString('en-US')}**`);
+  // Files vs folders split — shown for an UN-scoped report. When the split
+  // covers fewer items than the grand total (because only some collections carry
+  // a file/folder flag), we say so, so the two totals never look contradictory.
+  if (!typeScope && fileFolder) {
+    const files = fileFolder.files || 0, folders = fileFolder.folders || 0, sum = files + folders;
+    if (sum > 0) {
+      const note = (total > 0 && sum < total)
+        ? ` _(of ${sum.toLocaleString('en-US')} items that carry a file/folder flag; other collections don't split by type)_`
+        : '';
+      L.push(`**By type:** 📄 Files: **${files.toLocaleString('en-US')}** · 📁 Folders: **${folders.toLocaleString('en-US')}**${note}`);
       L.push('');
     }
   }
@@ -320,8 +324,13 @@ router.post('/query', requireAuth, async (req, res) => {
     if (filter && ['id', 'workspace_name', 'user_name', 'email'].includes(filter.type)) {
       try {
         const ql = question.toLowerCase();
-        const wantsFolders = /\bfolders?\b/i.test(ql);
-        const wantsFiles = /\bfiles?\b/i.test(ql) && !wantsFolders;
+        // Scope to ONE type only when the user names that type ALONE. "files and
+        // folders" (both) or neither → a COMBINED report (with a by-type split),
+        // never "folders only" just because the word "folders" appears.
+        const mentionsFiles = /\bfiles?\b/i.test(ql);
+        const mentionsFolders = /\bfolders?\b/i.test(ql);
+        const wantsFolders = mentionsFolders && !mentionsFiles;
+        const wantsFiles = mentionsFiles && !mentionsFolders;
         const typeScope = wantsFolders ? 'folders' : wantsFiles ? 'files' : null;
         // A workspace's data spans many collections (files, folders, collabs,
         // conflicts…). We read every one that holds this workspace's data — but
