@@ -317,9 +317,13 @@ router.post('/query', requireAuth, async (req, res) => {
   // an estimated completion date, the collection(s) involved, AND the exact
   // MongoDB query used. Deterministic — counts/dates come from live queries, never
   // invented. Falls through to the normal agent if it can't resolve a workspace.
+  // A "why did it conflict / give the error description / reason" question is NOT
+  // a status report — it wants the actual reasons. Let the agent's why-handling
+  // read the ErrorDescription field instead of producing a counts report.
+  const isWhyReason = /\bwhy\b|error[_ ]?description|\breasons?\b|\bcause\b/i.test(question);
   const wantsReport = isForecastQuestion(question)
     || /\b(report|percentage|percent|%|breakdown|summary|overall|status|how much|how many|migrat|processed|not[ _]?process|conflict|retry|retries|in[ _]?progress|remaining|pending|completed?)\b/i.test(question);
-  if (isMongo && wantsReport) {
+  if (isMongo && wantsReport && !isWhyReason) {
     const filter = extractSpecificFilter(question);
     if (filter && ['id', 'workspace_name', 'user_name', 'email'].includes(filter.type)) {
       try {

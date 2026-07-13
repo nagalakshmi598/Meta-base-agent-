@@ -837,6 +837,34 @@ export function buildQueryForTable(question, table, engine, hints = {}) {
         pipeline = [{ "$limit": 100 }];
         explanation = `All records from ${table.name}`;
       }
+    } else if (isWhy) {
+      // "Why did it go to conflict / fail?" → read the ERROR DESCRIPTION field and
+      // group the conflict/failed records by their reason, most common first, so
+      // we return the ACTUAL reasons (e.g. "Missing entry in CFOAuthCredential…")
+      // rather than a bare count. Works with or without a specific workspace id.
+      const errorField = findErrorField(fields);
+      const statusField = fields.find(f => /^process_?status$|^status$|^state$/i.test(f.name))
+                       || fields.find(f => /status|state|progress/i.test(f.name));
+      if (errorField) {
+        const wantsBad = /conflict|fail|error|issue|problem/i.test(q);
+        const match = (wantsBad && statusField)
+          ? { [statusField.name]: { '$regex': 'conflict|fail|error', '$options': 'i' } }
+          : null;
+        pipeline = [
+          ...(match ? [{ '$match': match }] : []),
+          { '$group': { '_id': `$${errorField.name}`, 'count': { '$sum': 1 } } },
+          { '$sort': { 'count': -1 } },
+          { '$limit': 50 }
+        ];
+        explanation = `Conflict/failure reasons in ${table.name} grouped by ${errorField.name}`;
+        queryType = 'aggregate';
+      } else {
+        const sf = fields.find(f => /status|state/i.test(f.name));
+        pipeline = sf
+          ? [{ '$match': { [sf.name]: { '$regex': 'conflict|fail|error', '$options': 'i' } } }, { '$limit': 50 }]
+          : [{ '$limit': 50 }];
+        explanation = `Conflict/failed records in ${table.name}`;
+      }
     } else if (isFailed) {
       const statusField = fields.find(f => /^(processstatus|migrationstatus|jobstatus|status|state)$/i.test(f.name))
                        || fields.find(f => /status|state|progress|active/i.test(f.name));

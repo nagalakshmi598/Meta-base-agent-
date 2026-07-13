@@ -531,18 +531,19 @@ export async function synthesizeAnswer(originalQuestion, parts, history = []) {
     return `I couldn't retrieve any data for **"${originalQuestion}"** — the database query returned nothing or the connection timed out. Please try again in a moment, or rephrase your question. I won't guess at an answer without real data.`;
   }
 
-  // ── FAST PATH: a single scalar answer (e.g. a COUNT) needs no LLM to phrase ──
-  // "how many … migrated / processed / conflict" returns one number. Answer it
-  // instantly and skip the synthesis round-trip — this is the most common
-  // question and keeps it near-instant instead of adding an extra LLM call.
+  // ── FAST PATH: a single scalar COUNT needs no LLM to phrase ──
+  // Only a PURE scalar ($count → one row, one cell). A grouped row like
+  // [status, count] or [errorDescription, count] must NOT collapse to its count —
+  // the label (the status/reason) is the answer the user wants, so those go to
+  // the full synthesis below. This is what makes "why did it conflict" show the
+  // real reason instead of "1".
   if (parts.length === 1) {
     const p = parts[0];
     const oneRow = p.rows && p.rows.length === 1 ? p.rows[0] : null;
-    // scalar = single cell, OR a grouped single row like [id, count] → take count
-    let scalar = null;
-    if (oneRow && oneRow.length === 1) scalar = oneRow[0];
-    else if (oneRow && oneRow.length === 2 && (typeof oneRow[1] === 'number' || /^\d+$/.test(String(oneRow[1])))) scalar = oneRow[1];
-    if (p.intent === 'data_query' && scalar != null && (typeof scalar === 'number' || /^\d+$/.test(String(scalar)))) {
+    const scalar = (oneRow && oneRow.length === 1) ? oneRow[0] : null;
+    // Don't fast-path "why/reason" questions — they need the reason text rendered.
+    const isWhy = /\bwhy\b|reason|cause|error\s*description|went.*(conflict|fail)/i.test(originalQuestion || '');
+    if (!isWhy && p.intent === 'data_query' && scalar != null && (typeof scalar === 'number' || /^\d+$/.test(String(scalar)))) {
       const n = typeof scalar === 'number' ? scalar : parseInt(scalar, 10);
       return `**${n.toLocaleString('en-US')}** — that's the exact count for _"${(originalQuestion || '').trim()}"_ (from the \`${p.collection}\` collection).\n\nAsk for a **breakdown** or the **conflict/failure reasons** if you'd like more detail.`;
     }
@@ -605,7 +606,9 @@ WHEN THE DATA CONTAINS ERRORS / CONFLICT REASONS (e.g. a "why did it fail/confli
     • DatabaseError / DataAccessResourceFailureException → A backend datastore error during migration; usually transient — retry.
     • NO_MESSAGE → The source channel/workspace was empty, so nothing was migrated (not a real failure).
     • Quota / storage full → The destination account is out of storage; free space or upgrade, then retry.
+    • "Missing entry in CFOAuthCredential" / missing credential / not mapped → The user shown (see the email in the message) isn't set up/authorized in CloudFuze's credential store, so their items couldn't be migrated. Add or re-authorize that user's account mapping (map the email to a valid destination account), then re-run the migration.
   If an error isn't in this list, explain it sensibly from its wording — but NEVER invent an error that isn't in the data.
+- ALWAYS quote the EXACT error text (e.g. the full ErrorDescription value, including any email/id it mentions) and THEN give the plain-English meaning right after it. The user wants the real reason, verbatim, translated.
 - Status meanings: PROCESSED = completed; PROCESSED_WITH_SOME_CONFLICTS = done but some items conflicted; CONFLICT = blocked by an existing item; FAILED/ERROR = errored; IN_PROGRESS = still running; NO_MESSAGE = source empty.`;
 
   try {
