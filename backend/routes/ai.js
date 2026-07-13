@@ -51,6 +51,43 @@ async function mapLimit(items, limit, fn) {
   return out;
 }
 
+// Answer for ONE specific record found by its _id (e.g. "what is the process
+// status of this <ObjectId>"). Leads with the exact status and reason, then
+// shows the record's key fields — deterministic, straight from the document.
+export function buildSingleDocAnswer(id, collectionName, doc) {
+  const keys = Object.keys(doc);
+  const statusKey = keys.find(k => /^process_?status$|^status$|^state$/i.test(k))
+                 || keys.find(k => /status$/i.test(k)) || keys.find(k => /status|state/i.test(k));
+  const status = statusKey ? doc[statusKey] : null;
+  const errKey = keys.find(k => /errordescription|error_description|usererror|errormessage|failreason|conflictreason|conflictdescription/i.test(k))
+              || keys.find(k => /reason|cause/i.test(k));
+  const err = errKey ? doc[errKey] : null;
+
+  const L = [];
+  L.push(status
+    ? `The status of this record is **${status}**.`
+    : `Here is the record \`${id}\`.`);
+  L.push('');
+  L.push(`_Record \`${id}\` — found in \`${collectionName}\` (matched by \`_id\`)._`);
+  if (err != null && String(err).trim() !== '' && String(err).trim() !== '-') {
+    L.push('');
+    L.push(`**Reason / error description:** ${String(err).replace(/\|/g, '/')}`);
+  }
+  L.push('');
+  // Key fields (non-empty, not huge), so the user sees the record's detail.
+  const entries = keys
+    .filter(k => !/^_id$/i.test(k))
+    .map(k => [k, doc[k]])
+    .filter(([, v]) => v != null && String(v).trim() !== '' && String(v).trim() !== '-' && String(v).length < 200)
+    .slice(0, 20);
+  if (entries.length) {
+    L.push(`| Field | Value |`);
+    L.push(`|---|---|`);
+    for (const [k, v] of entries) L.push(`| ${k} | ${String(v).replace(/\|/g, '/').replace(/[\r\n]+/g, ' ')} |`);
+  }
+  return L.join('\n');
+}
+
 // Compose a full, human-agent-style MIGRATION REPORT from the computed numbers.
 // Everything here is DETERMINISTIC — counts, percentages and dates come from the
 // real query + rate math, never invented. Includes: a per-status table with
@@ -329,6 +366,36 @@ router.post('/query', requireAuth, async (req, res) => {
     if (filter && ['id', 'workspace_name', 'user_name', 'email'].includes(filter.type)) {
       try {
         const ql = question.toLowerCase();
+
+        // ── SINGLE RECORD BY _id ────────────────────────────────────────────
+        // If the id is a specific document's _id (a 24-hex ObjectId), answer THAT
+        // one record's exact status — not a diluted aggregate across collections.
+        // _id is indexed, so probing candidates is fast. This is what makes
+        // "what is the process status of this <id>" return the real value (e.g.
+        // CONFLICT) instead of a 33/33/33 split.
+        if (filter.type === 'id' && /^[0-9a-f]{24}$/i.test(filter.value)) {
+          const idCands = getTopCollections(question, schema, 12, scanData).map(t => enrichTableFields(t, scanData));
+          const hits = await mapLimit(idCands, 6, async (cand) => {
+            const r = await runNativeSafe(JSON.stringify([{ '$match': { _id: { '$oid': filter.value } } }, { '$limit': 1 }]), cand.name);
+            return (r.ok && r.data?.rows?.length) ? { name: cand.name, data: r.data } : null;
+          });
+          const hit = hits.filter(Boolean)[0];
+          if (hit) {
+            const cols = (hit.data.cols || []).map(c => c.name);
+            const row = hit.data.rows[0];
+            const doc = {}; cols.forEach((c, i) => { doc[c] = row[i]; });
+            console.log(`[Record] _id ${filter.value} found in ${hit.name}`);
+            return res.json({
+              answer: buildSingleDocAnswer(filter.value, hit.name, doc),
+              mode: 'ai', query_type: 'record', is_mongo: true, collection: hit.name, tables_used: [hit.name],
+              sql: JSON.stringify([{ '$match': { _id: { '$oid': filter.value } } }], null, 2),
+              results: { cols: hit.data.cols || [], rows: hit.data.rows || [], row_count: hit.data.rows?.length || 0 }
+            });
+          }
+          // Not an _id anywhere → it's a workspace/foreign id; fall through to the
+          // aggregated report below.
+        }
+
         // Scope to ONE type only when the user names that type ALONE. "files and
         // folders" (both) or neither → a COMBINED report (with a by-type split),
         // never "folders only" just because the word "folders" appears.
