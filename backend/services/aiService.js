@@ -213,8 +213,15 @@ function mdTable(headers, rows, { maxCols = 8, maxRows = 50, maxCell = 60 } = {}
   if (!cols.length) return '';
   const extraCols = (headers || []).length - cols.length;
   const allRows = rows || [];
+  // Detect numeric columns (from a sample) so numbers right-align in the table.
+  const isNum = v => v !== null && v !== undefined && v !== '' && /^-?[\d,]+(\.\d+)?%?$/.test(String(v).trim());
+  const sample = allRows.slice(0, 40);
+  const numeric = cols.map((_, i) => {
+    const vals = sample.map(r => r[i]).filter(v => v !== null && v !== undefined && v !== '');
+    return vals.length > 0 && vals.every(isNum);
+  });
   const hdr  = `| ${cols.map(h => mdCell(h, 40)).join(' | ')} |`;
-  const sep  = `| ${cols.map(() => '---').join(' | ')} |`;
+  const sep  = `| ${cols.map((_, i) => (numeric[i] ? '---:' : '---')).join(' | ')} |`;
   const body = allRows.slice(0, maxRows)
     .map(r => `| ${cols.map((_, i) => mdCell(r[i], maxCell)).join(' | ')} |`)
     .join('\n');

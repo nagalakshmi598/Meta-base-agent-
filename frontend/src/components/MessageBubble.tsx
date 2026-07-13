@@ -310,7 +310,16 @@ export default function MessageBubble({ message, onEdit }: Props) {
         {message.content && (
           <div className="bg-white border border-gray-200 rounded-xl rounded-tl-sm px-5 py-4 shadow-sm">
             <div className="prose-content">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
+                components={{
+                  // Wrap every table so it scrolls horizontally instead of
+                  // squashing/overflowing — keeps columns aligned and readable.
+                  table: ({ node, ...props }) => (
+                    <div className="table-scroll"><table {...props} /></div>
+                  ),
+                }}
+              >
                 {message.content}
               </ReactMarkdown>
             </div>

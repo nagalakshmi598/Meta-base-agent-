@@ -95,31 +95,60 @@
     border: none;
   }
 
+  /* Horizontal-scroll wrapper so wide tables never overflow the bubble */
+  .prose-content .table-scroll {
+    width: 100%;
+    max-width: 100%;
+    overflow-x: auto;
+    margin-bottom: 1rem;
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    -webkit-overflow-scrolling: touch;
+  }
+
   .prose-content table {
     width: 100%;
     border-collapse: collapse;
-    margin-bottom: 1rem;
-    font-size: 0.875rem;
+    margin: 0;
+    font-size: 0.8125rem;
+    /* Size columns to their content; the wrapper scrolls if that's too wide. */
+    table-layout: auto;
   }
 
   .prose-content th {
     background: #f0f4ff;
-    padding: 0.5rem 0.75rem;
+    padding: 0.5rem 0.85rem;
     text-align: left;
     font-weight: 600;
     color: #0129ac;
     border-bottom: 2px solid #dbeafe;
+    border-right: 1px solid #e5edff;
+    white-space: nowrap;      /* headers stay on one line */
+    vertical-align: middle;
+    position: sticky;
+    top: 0;
   }
+  .prose-content th:last-child { border-right: none; }
 
   .prose-content td {
-    padding: 0.5rem 0.75rem;
-    border-bottom: 1px solid #e2e8f0;
+    padding: 0.45rem 0.85rem;
+    border-bottom: 1px solid #eef2f7;
+    border-right: 1px solid #f1f5f9;
     color: #334155;
+    vertical-align: top;
+    white-space: nowrap;      /* keep each value on one line so columns align */
+    max-width: 460px;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
+  .prose-content td:last-child { border-right: none; }
 
-  .prose-content tr:hover td {
-    background: #f8fafc;
-  }
+  /* Right-align numeric columns (gfm emits text-align:right from `|---:|`) */
+  .prose-content td[align="right"], .prose-content th[align="right"] { text-align: right; }
+
+  /* Zebra striping for readability */
+  .prose-content tbody tr:nth-child(even) td { background: #fafbfc; }
+  .prose-content tbody tr:hover td { background: #eef4ff; }
 
   .prose-content blockquote {
     border-left: 3px solid #0129ac;
