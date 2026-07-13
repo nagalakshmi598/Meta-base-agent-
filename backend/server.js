@@ -25,7 +25,9 @@ app.use(cors({
 }));
 
 app.use(morgan('dev'));
-app.use(express.json({ limit: '10mb' }));
+// Large limit so a message can carry many pasted screenshots (up to ~30 images
+// as base64). Each base64 image is ~1.3x its file size, so allow plenty.
+app.use(express.json({ limit: '75mb' }));
 
 app.use(session({
   secret: process.env.SESSION_SECRET || 'metabase-ai-secret-key-change-in-production',

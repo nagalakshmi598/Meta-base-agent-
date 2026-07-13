@@ -75,6 +75,7 @@ export default function ChatInterface({
   const voiceStartRef = useRef(0);          // when this recording session began
   const voiceBaseRef = useRef('');          // committed transcript across restarts
   const VOICE_MAX_MS = 10 * 60 * 1000;      // record up to 10 minutes
+  const MAX_IMAGES = 30;                     // paste/upload up to 30 screenshots
 
   useEffect(() => {
     const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
@@ -145,7 +146,7 @@ export default function ChatInterface({
     const imgs = Array.from(files).filter(f => f.type.startsWith('image/'));
     if (!imgs.length) return;
     const read = await Promise.all(imgs.map(fileToImage));
-    setAttachedImages(prev => [...prev, ...read].slice(0, 4)); // cap at 4
+    setAttachedImages(prev => [...prev, ...read].slice(0, MAX_IMAGES)); // up to 30 screenshots
   };
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -461,19 +462,28 @@ export default function ChatInterface({
           }`}>
             {/* Attached image previews */}
             {attachedImages.length > 0 && (
-              <div className="flex flex-wrap gap-2 px-1 pt-1">
-                {attachedImages.map((img, i) => (
-                  <div key={i} className="relative group">
-                    <img src={img.preview} alt={img.name} className="h-16 w-16 object-cover rounded-lg border border-gray-200" />
-                    <button
-                      onClick={() => removeImage(i)}
-                      title="Remove"
-                      className="absolute -top-1.5 -right-1.5 bg-gray-800 text-white rounded-full w-5 h-5 flex items-center justify-center hover:bg-red-500 transition-colors shadow"
-                    >
-                      <X size={11} />
-                    </button>
-                  </div>
-                ))}
+              <div className="px-1 pt-1">
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-xs text-gray-500">
+                    {attachedImages.length} image{attachedImages.length !== 1 ? 's' : ''} attached
+                    {attachedImages.length >= MAX_IMAGES && <span className="text-amber-600"> (max {MAX_IMAGES})</span>}
+                  </span>
+                  <button onClick={() => setAttachedImages([])} className="text-xs text-gray-400 hover:text-red-500 transition-colors">Clear all</button>
+                </div>
+                <div className="flex flex-wrap gap-2 max-h-40 overflow-y-auto">
+                  {attachedImages.map((img, i) => (
+                    <div key={i} className="relative group">
+                      <img src={img.preview} alt={img.name} className="h-16 w-16 object-cover rounded-lg border border-gray-200" />
+                      <button
+                        onClick={() => removeImage(i)}
+                        title="Remove"
+                        className="absolute -top-1.5 -right-1.5 bg-gray-800 text-white rounded-full w-5 h-5 flex items-center justify-center hover:bg-red-500 transition-colors shadow"
+                      >
+                        <X size={11} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
 
