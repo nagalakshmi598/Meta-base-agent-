@@ -535,6 +535,21 @@ export function statusFilterRegex(question, filterValue = '') {
   return '';
 }
 
+// Does the question ask for the REASON / ERROR DESCRIPTION (why it failed or
+// conflicted, what the error was)? Matches many phrasings — "why did it
+// conflict", "reason for failure", "give me the error description", "what error",
+// "show me the errors", "what went wrong", "explain the conflict", "diagnose" —
+// but NOT a plain count like "how many errors".
+export function isReasonQuestion(question) {
+  const q = (question || '').toLowerCase();
+  const explicit = /\bwhy\b|\breasons?\b|\bcaus(e|es|ed|ing)\b|error[_ ]?(description|desc|message|msg|detail|details|info|reason|text)|fail(ure|ed)?[_ ]?reason|reason (for|why|behind|of)|what went wrong|went wrong|what.*(caused|went wrong)|explain.*(fail|conflict|error)|diagnos/i.test(q);
+  if (explicit) return true;
+  // "errors"/"error" asked as something to SHOW (not counted)
+  if (/\berrors?\b/i.test(q) && !/\bhow many\b|\bcount\b|\bnumber of\b/i.test(q)
+      && /\b(show|list|give|provide|what|which|see|view|get|display|tell|any|the)\b/i.test(q)) return true;
+  return false;
+}
+
 // ── FORECAST / ETA (estimate when a migration will finish) ─────────────────
 
 // Is the user asking WHEN a migration will finish / how long is left / an ETA?
@@ -672,9 +687,13 @@ export function buildQueryForTable(question, table, engine, hints = {}) {
   const op   = (hints.operation || '').toLowerCase();
   const fval = (hints.filterValue || '').toString().toLowerCase().trim();
 
-  const isCount  = op ? op === 'count'     : /how many|count|total|number of|tally/i.test(q);
-  const isStatus = op ? op === 'breakdown' : /status breakdown|by status|group.*status|distribution|breakdown|summary/i.test(q);
-  const isWhy    = op ? op === 'why'       : /why|reason|cause|provide reason|went.*conflict|went.*fail|explain.*why|what.*reason/i.test(q);
+  // A reason/error-description ask ALWAYS means "why" — even if the LLM mislabeled
+  // the operation as count/breakdown — so "give me the error description" reads
+  // the reasons instead of returning a number.
+  const isReason = op === 'why' || isReasonQuestion(q);
+  const isWhy    = isReason;
+  const isCount  = !isReason && (op ? op === 'count'     : /how many|count|total|number of|tally/i.test(q));
+  const isStatus = !isReason && (op ? op === 'breakdown' : /status breakdown|by status|group.*status|distribution|breakdown|summary/i.test(q));
   const isRecent = op ? op === 'recent'    : /recent|latest|last|newest|today|yesterday/i.test(q);
   // A value-filter (e.g. only failed / conflict / active). Triggered by an LLM
   // filter hint, or by keywords in the text.

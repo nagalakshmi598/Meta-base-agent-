@@ -2,7 +2,7 @@ import dotenv from 'dotenv';
 import axios from 'axios';
 import {
   isMongoDB, getTopCollections, classifyDatabase,
-  extractSpecificFilter, buildMongoQuery, buildKeywordSQL
+  extractSpecificFilter, buildMongoQuery, buildKeywordSQL, isReasonQuestion
 } from './queryService.js';
 import { searchDocs, searchDocsSemantic } from './docsService.js';
 dotenv.config();
@@ -542,7 +542,7 @@ export async function synthesizeAnswer(originalQuestion, parts, history = []) {
     const oneRow = p.rows && p.rows.length === 1 ? p.rows[0] : null;
     const scalar = (oneRow && oneRow.length === 1) ? oneRow[0] : null;
     // Don't fast-path "why/reason" questions — they need the reason text rendered.
-    const isWhy = /\bwhy\b|reason|cause|error\s*description|went.*(conflict|fail)/i.test(originalQuestion || '');
+    const isWhy = isReasonQuestion(originalQuestion || '');
     if (!isWhy && p.intent === 'data_query' && scalar != null && (typeof scalar === 'number' || /^\d+$/.test(String(scalar)))) {
       const n = typeof scalar === 'number' ? scalar : parseInt(scalar, 10);
       return `**${n.toLocaleString('en-US')}** — that's the exact count for _"${(originalQuestion || '').trim()}"_ (from the \`${p.collection}\` collection).\n\nAsk for a **breakdown** or the **conflict/failure reasons** if you'd like more detail.`;
@@ -705,7 +705,7 @@ export async function interpretResults(question, queryInfo, metabaseResult) {
 
   const subject = queryInfo?.collection || (queryInfo?.tables_used?.[0]) || 'records';
 
-  const isWhy = /why|reason|cause|provide reason|went.*conflict|went.*fail|explain.*why|what.*reason/i.test(question);
+  const isWhy = isReasonQuestion(question);
   const specificFilter = extractSpecificFilter(question);
   const specificId = specificFilter?.value || null;
 

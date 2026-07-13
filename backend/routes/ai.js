@@ -14,7 +14,8 @@ import {
   answerSavedQueriesQuestion,
   isForecastQuestion, extractSpecificFilter, buildIdMatchCondition,
   buildNameMatchCondition, pickStatusFieldName, findTimeField, parseTimestampMs,
-  classifyForecastCounts, computeForecast, humanizeDuration, withPercentages
+  classifyForecastCounts, computeForecast, humanizeDuration, withPercentages,
+  isReasonQuestion
 } from '../services/queryService.js';
 import { logQuery, getRecentLogs } from '../services/queryLogService.js';
 
@@ -320,7 +321,7 @@ router.post('/query', requireAuth, async (req, res) => {
   // A "why did it conflict / give the error description / reason" question is NOT
   // a status report — it wants the actual reasons. Let the agent's why-handling
   // read the ErrorDescription field instead of producing a counts report.
-  const isWhyReason = /\bwhy\b|error[_ ]?description|\breasons?\b|\bcause\b/i.test(question);
+  const isWhyReason = isReasonQuestion(question);
   const wantsReport = isForecastQuestion(question)
     || /\b(report|percentage|percent|%|breakdown|summary|overall|status|how much|how many|migrat|processed|not[ _]?process|conflict|retry|retries|in[ _]?progress|remaining|pending|completed?)\b/i.test(question);
   if (isMongo && wantsReport && !isWhyReason) {
@@ -469,7 +470,7 @@ router.post('/query', requireAuth, async (req, res) => {
             // Classify the operation FIRST — it decides how many collections to
             // search.
             const opLower = (sq.operation || '').toLowerCase();
-            const isWhyQ = opLower === 'why' || /\bwhy\b|reason|cause|went.*(conflict|fail)/i.test(opText);
+            const isWhyQ = opLower === 'why' || isReasonQuestion(opText);
             // A MIGRATION-VOLUME question ("how much migrated / processed / not
             // processed / progress / conflict count …"). For these the real data
             // lives in a per-ITEM detail collection (FileFolderInfo, MessageEachFiles),
