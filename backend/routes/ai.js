@@ -362,7 +362,16 @@ router.post('/query', requireAuth, async (req, res) => {
   const wantsReport = isForecastQuestion(question)
     || /\b(report|percentage|percent|%|breakdown|summary|overall|status|how much|how many|migrat|processed|not[ _]?process|conflict|retry|retries|in[ _]?progress|remaining|pending|completed?)\b/i.test(question);
   if (isMongo && wantsReport && !isWhyReason) {
-    const filter = extractSpecificFilter(question);
+    let filter = extractSpecificFilter(question);
+    // Follow-up like "when will the remaining migrate?" — the workspace id was
+    // named earlier in the conversation, not in this message. Carry it forward
+    // from the most recent turn that mentioned one, so the ETA/report still runs.
+    if (!filter && Array.isArray(history) && history.length) {
+      for (const h of [...history].reverse()) {
+        const f = extractSpecificFilter(String(h?.content || ''));
+        if (f && ['id', 'workspace_name', 'user_name', 'email'].includes(f.type)) { filter = f; break; }
+      }
+    }
     if (filter && ['id', 'workspace_name', 'user_name', 'email'].includes(filter.type)) {
       try {
         const ql = question.toLowerCase();
