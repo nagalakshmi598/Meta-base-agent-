@@ -219,6 +219,16 @@ router.post('/query', requireAuth, async (req, res) => {
         status: (payload.error || payload.query_type === 'error') ? 'error' : 'ok'
       });
     } catch {}
+    // Remember the collection(s) this answer came from, so a follow-up like
+    // "which collection is that from?" can be answered from ground truth instead
+    // of the LLM guessing. Only update on real data answers (don't clobber with
+    // meta/error responses that carry no collection).
+    try {
+      const colls = (payload.tables_used && payload.tables_used.length)
+        ? payload.tables_used
+        : (payload.collection ? [payload.collection] : null);
+      if (colls && colls.length) req.session.lastCollections = colls;
+    } catch {}
     return _json(payload);
   };
 
@@ -303,6 +313,25 @@ router.post('/query', requireAuth, async (req, res) => {
   const savedAnswer = answerSavedQueriesQuestion(req.session.id, question);
   if (savedAnswer) {
     return res.json({ answer: savedAnswer, mode: 'ai', query_type: 'saved_queries' });
+  }
+
+  // "Which collection is THAT result/aggregate from?" — a follow-up about the
+  // PREVIOUS answer. Answer from the collection(s) actually used last turn (kept
+  // in the session), never let the LLM guess. Distinct from "which collection has
+  // X data" (schema navigation), which references data, not "this/that/the result".
+  {
+    const ql = (question || '').toLowerCase();
+    const asksWhichColl = /(which|what|from which)\s+(collection|table)\b|came? from|generated from|based on which/.test(ql);
+    const aboutPrev = /\b(this|that|it|these|those|above|previous|last|the (aggregate|result|report|breakdown|count|answer|data|number|status|query))\b|aggregate|result/.test(ql);
+    const lastColls = req.session.lastCollections || [];
+    if (lastColls.length && asksWhichColl && aboutPrev) {
+      const list = lastColls.map(c => `\`${c}\``).join(', ');
+      const noun = lastColls.length > 1 ? 'collections' : 'collection';
+      return res.json({
+        answer: `That result came from the ${noun} ${list} in the **${schema.name}** database.`,
+        mode: 'ai', query_type: 'meta', tables_used: lastColls, collection: lastColls[0]
+      });
+    }
   }
 
   // ═══ VISION: an image/screenshot was attached → analyze it with the LLM ═══
