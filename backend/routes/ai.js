@@ -121,7 +121,11 @@ export function buildReportAnswer({ filter, statusRows, buckets, fc, statusField
   if (buckets.inProgress > 0) L.push(`- 🔄 **In progress:** ${buckets.inProgress.toLocaleString('en-US')} (${pctOf(buckets.inProgress)}%)`);
   if (buckets.conflict > 0)   L.push(`- ⚠️ **Conflict:** ${buckets.conflict.toLocaleString('en-US')} (${pctOf(buckets.conflict)}%)`);
   if (buckets.retry > 0)      L.push(`- 🔁 **Retry:** ${buckets.retry.toLocaleString('en-US')} (${pctOf(buckets.retry)}%)`);
-  if (buckets.failed > 0)     L.push(`- ❌ **Failed:** ${buckets.failed.toLocaleString('en-US')} (${pctOf(buckets.failed)}%)`);
+  if (buckets.failed > 0)     L.push(`- ❌ **Failed / error:** ${buckets.failed.toLocaleString('en-US')} (${pctOf(buckets.failed)}%)`);
+  if (buckets.paused > 0)     L.push(`- ⏸️ **Paused / suspended:** ${buckets.paused.toLocaleString('en-US')} (${pctOf(buckets.paused)}%)`);
+  if (buckets.cancelled > 0)  L.push(`- 🚫 **Cancelled:** ${buckets.cancelled.toLocaleString('en-US')} (${pctOf(buckets.cancelled)}%)`);
+  if (buckets.warning > 0)    L.push(`- ⚡ **Warning:** ${buckets.warning.toLocaleString('en-US')} (${pctOf(buckets.warning)}%)`);
+  if (buckets.empty > 0)      L.push(`- ⚪ **No message / empty source:** ${buckets.empty.toLocaleString('en-US')} (${pctOf(buckets.empty)}%)`);
   L.push('');
 
   // Files vs folders split — shown for an UN-scoped report. When the split

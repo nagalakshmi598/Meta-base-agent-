@@ -18,42 +18,75 @@ export function pickStatusFieldName(cols = []) {
   );
 }
 
-// Given a collection's REAL status vocabulary (captured during the deep scan as
-// [{value,count}]) and the status the user asked about, return the EXACT stored
-// values that match — so we filter on ground-truth values instead of a guessed
-// regex. `intent` is 'processed' | 'not_processed' | 'conflict' | 'failed' |
-// 'active' | 'inactive'. Returns [] when nothing matches (caller then falls back
-// to the generic regex). This is what makes "how many processed / migrated /
-// not migrated / conflict" correct even when a collection uses its own wording
-// (TRANSFERRED, MOVED, DONE, REPLIES_CONFLICT, …).
+// ── CANONICAL STATUS CLASSIFIER ────────────────────────────────────────────
+// CloudFuze has NO single status enum — every scheduler/entity defines its own
+// (CFMoveWorkSpace, CFMove_EachFile, CFMessageEachFiles, MultiUserMoveQueue,
+// MessageJob, transfer-status, permission, metadata, links, prescan…). They
+// share a vocabulary though, so we map any real value to ONE canonical bucket.
+// Ordered so combined/negated values resolve correctly (NOT_/YET_ before
+// processed; PROCESSING/IN_PROGRESS before processed; PROCESSED_WITH_SOME_* →
+// processed). Buckets: processed | inProgress | notProcessed | conflict |
+// failed | retry | paused | cancelled | warning | empty | other.
+const STATUS_RE = {
+  notProcessed: /not[ _]?process|unprocess|not[ _]?migrat|not[ _]?complet|not[ _]?done|not[ _]?start|notstarted|yet[ _]?to|yet_to|pending|queued|in[ _]?queue|picking[_ ]?not|premigration|pre[_ ]?scan|report_notprocessed|\btodo\b|to[ _]?do|waiting|invite[_ ]?member/,
+  inProgress:   /in[ _]?progress|inprogress|processing|picking[_ ]?in|delta[_ ]?in|\brunning\b|ongoing|migrating|transferring|\bmoving\b|\bstarted\b|\bresume\b|restart|space_not_closed/,
+  processed:    /processed|process_with|complete|completed|success|migrated|transferr?ed|\bmoved\b|copied|uploaded|synced|finished|\bdone\b|partially[_ ]?complet|multiusertrail|report[_ ]?download|cloud[_ ]?deleted|picking[_ ]?done/,
+  conflict:     /conflict/,
+  failed:       /\bfail\b|failed|failure|\berror\b|exception|rejected|\babort/,
+  retry:        /retry|retries|retrying|reattempt|requeue/,
+  paused:       /\bpause\b|paused|suspend|\bstop\b|trial[_ ]?pause/,
+  cancelled:    /cancel/,
+  timedOut:     /timed?[ _]?out/,
+  warning:      /warning|\bwarn\b/,
+  empty:        /no[_ ]?message|no[_ ]?report|not[_ ]?required/,
+};
+
+// Map a single status value → its canonical bucket (precedence-ordered).
+export function classifyStatusValue(value) {
+  const v = String(value == null ? '' : value).toLowerCase();
+  if (!v) return 'other';
+  if (STATUS_RE.notProcessed.test(v)) return 'notProcessed';
+  if (STATUS_RE.inProgress.test(v))   return 'inProgress';
+  if (STATUS_RE.retry.test(v))        return 'retry';
+  if (STATUS_RE.processed.test(v))    return 'processed';   // incl. PROCESSED_WITH_SOME_CONFLICTS
+  if (STATUS_RE.conflict.test(v))     return 'conflict';
+  if (STATUS_RE.timedOut.test(v))     return 'failed';
+  if (STATUS_RE.failed.test(v))       return 'failed';
+  if (STATUS_RE.cancelled.test(v))    return 'cancelled';
+  if (STATUS_RE.paused.test(v))       return 'paused';
+  if (STATUS_RE.warning.test(v))      return 'warning';
+  if (STATUS_RE.empty.test(v))        return 'empty';
+  return 'other';
+}
+
+// Given a collection's REAL status vocabulary ([{value,count}]) and the status
+// the user asked about, return the EXACT stored values that match — so we filter
+// on ground-truth values. `intent` is one of the canonical buckets plus the
+// aliases 'not_processed' | 'in_progress' | 'active' | 'inactive'.
 export function matchStatusValues(statusValues, intent) {
   if (!Array.isArray(statusValues) || !statusValues.length || !intent) return [];
   const has = (v, re) => re.test(String(v).toLowerCase());
-  const NOT_PROC = /not[ _]?process|unprocess|not[ _]?migrat|not[ _]?complet|not[ _]?done|pending|queued|inqueue|in[ _]?queue|todo|to[ _]?do|yet|remaining|waiting|skipped|notstarted|not[ _]?started/;
-  const PROC     = /process|complet|success|migrat|transferr?ed|moved|copied|uploaded|synced|finish|\bdone\b/;
-  const rules = {
-    not_processed: v => has(v, NOT_PROC),
-    processed:     v => has(v, PROC) && !has(v, NOT_PROC), // exclude NOT_PROCESSED
-    conflict:      v => has(v, /conflict|duplicate|mismatch|collision/),
-    failed:        v => has(v, /fail|error|broken|exception|rejected|abort/),
-    inactive:      v => has(v, /inactive|disabled|suspend|deactivat/),
-    active:        v => has(v, /\bactive\b|enabled/) && !has(v, /inactive|deactivat/),
-  };
-  const rule = rules[intent];
-  if (!rule) return [];
-  return statusValues.filter(sv => rule(sv.value)).map(sv => sv.value);
+  // Non-migration flags (account/cloud active/inactive) keep their own matcher.
+  if (intent === 'inactive') return statusValues.filter(sv => has(sv.value, /inactive|disabled|suspend|deactivat/)).map(sv => sv.value);
+  if (intent === 'active')   return statusValues.filter(sv => has(sv.value, /\bactive\b|enabled/) && !has(sv.value, /inactive|deactivat/)).map(sv => sv.value);
+  const bucket = { not_processed: 'notProcessed', in_progress: 'inProgress' }[intent] || intent;
+  return statusValues.filter(sv => classifyStatusValue(sv.value) === bucket).map(sv => sv.value);
 }
 
 // Turn the free-text question + optional LLM filterValue into a canonical status
-// intent used by matchStatusValues(). Mirrors statusFilterRegex()'s ordering
-// (not-processed BEFORE processed). Returns '' when no status was requested.
+// intent used by matchStatusValues(). Ordered so negated/progress phrasings win
+// before "processed". Returns '' when no specific status was requested.
 export function statusIntent(question, filterValue = '') {
   const s = `${filterValue} ${question}`.toLowerCase();
-  if (/\bnot[ _]?process|unprocess|pending|not[ _]?migrat|did\s?n.?t migrat|not[ _]?complet|not[ _]?done|yet to|remaining|left to|queued|waiting/i.test(s)) return 'not_processed';
-  if (/process|migrat|complet|success|\bdone\b|finished|transferr?ed|moved|uploaded|synced/i.test(s)) return 'processed';
+  if (/\bnot[ _]?process|unprocess|pending|not[ _]?migrat|did\s?n.?t migrat|not[ _]?complet|not[ _]?done|not[ _]?start|yet to|left to|queued|in[ _]?queue|waiting/i.test(s)) return 'not_processed';
+  if (/in[ _]?progress|inprogress|processing|still (running|going|migrating|processing)|currently (migrating|processing|running)|ongoing/i.test(s)) return 'in_progress';
+  if (/retry|retrying|retries|reattempt/i.test(s)) return 'retry';
   if (/conflict/i.test(s)) return 'conflict';
-  if (/fail|error|broken/i.test(s)) return 'failed';
-  if (/inactive|disabled|suspend/i.test(s)) return 'inactive';
+  if (/fail|error|broken|exception|timed?[ _]?out|abort/i.test(s)) return 'failed';
+  if (/process|migrat|complet|success|\bdone\b|finished|transferr?ed|moved|uploaded|synced/i.test(s)) return 'processed';
+  if (/suspend|pause/i.test(s)) return 'paused';
+  if (/cancel/i.test(s)) return 'cancelled';
+  if (/inactive|disabled/i.test(s)) return 'inactive';
   if (/\bactive\b|enabled/i.test(s)) return 'active';
   return '';
 }
@@ -603,26 +636,24 @@ export function parseTimestampMs(v) {
 export function classifyForecastCounts(statusValues = []) {
   const sv = Array.isArray(statusValues) ? statusValues : [];
   const total = sv.reduce((a, s) => a + (Number(s.count) || 0), 0);
-  const sum = pred => sv.filter(s => pred(String(s.value).toLowerCase())).reduce((a, s) => a + (Number(s.count) || 0), 0);
-  const NOTPROC = /not[ _]?process|unprocess|not[ _]?migrat|not[ _]?complet|not[ _]?done|pending|queued|todo|to[ _]?do|yet|notstarted|not[ _]?started/;
-  const INPROG  = /progress|processing|running|ongoing|migrating|transferring|moving|inprogress|started|active/;
-  const CONFLICT = /conflict|duplicate|mismatch|collision/;
-  const FAILED   = /fail|error|broken|exception|rejected|abort/;
-  const RETRY    = /retry|retries|retrying|reattempt|requeue/;
-  // Matches PROCESSED, VERSION_PROCESSED, TRANSFERRED, MIGRATED, DONE… but NOT
-  // the NOT_/VERSION_NOT_ variants (NOTPROC is checked first).
-  const isProc   = v => /process|complet|success|migrat|transferr?ed|moved|copied|uploaded|synced|finish|\bdone\b/.test(v) && !NOTPROC.test(v);
+  // Bucket every value canonically (mutually exclusive), then tally.
+  const b = { processed: 0, inProgress: 0, notProcessed: 0, conflict: 0, failed: 0, retry: 0, paused: 0, cancelled: 0, warning: 0, empty: 0, other: 0 };
+  for (const s of sv) b[classifyStatusValue(s.value)] += (Number(s.count) || 0);
   return {
     total,
-    processed: sum(isProc),
-    // Everything still to finish: not-processed (incl. VERSION_NOT_PROCESSED),
-    // in-progress, and retry items.
-    remaining: sum(v => (NOTPROC.test(v) || INPROG.test(v) || RETRY.test(v)) && !isProc(v)),
-    inProgress: sum(v => INPROG.test(v) && !isProc(v)),
-    notProcessed: sum(v => NOTPROC.test(v) && !isProc(v)),
-    conflict:  sum(v => CONFLICT.test(v)),
-    failed:    sum(v => FAILED.test(v) && !CONFLICT.test(v)),
-    retry:     sum(v => RETRY.test(v)),
+    processed: b.processed,
+    inProgress: b.inProgress,
+    notProcessed: b.notProcessed,
+    conflict: b.conflict,
+    failed: b.failed,
+    retry: b.retry,
+    paused: b.paused,
+    cancelled: b.cancelled,
+    warning: b.warning,
+    empty: b.empty,
+    // Still to finish = not-processed + in-progress + retry + paused (paused/
+    // suspended will resume). Cancelled/failed/empty won't auto-complete.
+    remaining: b.notProcessed + b.inProgress + b.retry + b.paused,
   };
 }
 
