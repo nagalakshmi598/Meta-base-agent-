@@ -108,16 +108,19 @@ router.get('/collections', requireAuth, async (req, res) => {
 // Reads sample rows from each collection (fields + real values) so routing and
 // answers use real data. Scans in PARALLEL batches so even 100+ collections are
 // learned quickly. Shared by /scan-database (one DB) and /scan-all-databases.
-async function scanCollections(client, token, dbId, tableNames, isMongo, cacheKey, cap = 300, batchSize = 10) {
+async function scanCollections(client, token, dbId, tableNames, isMongo, cacheKey, cap = 300, batchSize = 10, deep = false) {
   const tableList = (tableNames || []).slice(0, cap);
   let scanned = 0;
   for (let i = 0; i < tableList.length; i += batchSize) {
     const batch = tableList.slice(i, i + batchSize);
     const results = await Promise.all(batch.map(async (tableName) => {
       try {
+        // Sample more rows (15) so we discover MORE fields — MongoDB documents in
+        // the same collection can carry different keys, so a handful of rows would
+        // miss fields the agent needs (extra id/status/error fields, etc.).
         const sampleQuery = isMongo
-          ? { query: JSON.stringify([{ '$limit': 5 }]), collection: tableName, template_tags: {} }
-          : { query: `SELECT * FROM "${tableName}" LIMIT 5`, template_tags: {} };
+          ? { query: JSON.stringify([{ '$limit': 15 }]), collection: tableName, template_tags: {} }
+          : { query: `SELECT * FROM "${tableName}" LIMIT 15`, template_tags: {} };
         // The TRUE document count — read in PARALLEL with the sample so the agent
         // knows each collection's real volume (a 6-doc side-table vs a 96,000-doc
         // main table). Runs concurrently, so it adds little wall-clock. If the
@@ -125,15 +128,31 @@ async function scanCollections(client, token, dbId, tableNames, isMongo, cacheKe
         const countQuery = isMongo
           ? { query: JSON.stringify([{ '$count': 'n' }]), collection: tableName, template_tags: {} }
           : { query: `SELECT COUNT(*) AS n FROM "${tableName}"`, template_tags: {} };
-        const [result, countRes] = await Promise.all([
+        // DEEP field discovery (Mongo only): union EVERY top-level field name
+        // across a 200-doc sample, so schema-varying documents don't hide fields.
+        // Enabled for the single-DB scan (the DB the user is actively querying).
+        const fieldsQuery = (deep && isMongo)
+          ? { query: JSON.stringify([{ '$limit': 200 }, { '$project': { kv: { '$objectToArray': '$$ROOT' } } }, { '$unwind': '$kv' }, { '$group': { '_id': '$kv.k' } }, { '$limit': 800 }]), collection: tableName, template_tags: {} }
+          : null;
+        const [result, countRes, fieldsRes] = await Promise.all([
           client.post(token, '/api/dataset', { type: 'native', native: sampleQuery, database: dbId }),
           client.post(token, '/api/dataset', { type: 'native', native: countQuery, database: dbId }).catch(() => null),
+          fieldsQuery ? client.post(token, '/api/dataset', { type: 'native', native: fieldsQuery, database: dbId }).catch(() => null) : Promise.resolve(null),
         ]);
         if (!result.error && result.data?.rows?.length > 0) {
-          const cols = (result.data.cols || []).map(c => c.name);
+          // Columns present in the sampled rows (their index maps to row cells).
+          const sampleCols = (result.data.cols || []).map(c => c.name);
+          // Full field list = sample columns + any extra names the deep field scan
+          // discovered (those won't have sample values, but the agent still knows
+          // they exist for query building).
+          let cols = [...sampleCols];
+          if (fieldsRes && !fieldsRes.error && fieldsRes.data?.rows?.length) {
+            const discovered = fieldsRes.data.rows.map(r => r[0]).filter(n => typeof n === 'string' && n);
+            if (discovered.length) cols = [...new Set([...cols, ...discovered])];
+          }
           const rows = result.data.rows;
           const sampleValues = {};
-          cols.forEach((col, idx) => {
+          sampleCols.forEach((col, idx) => {
             sampleValues[col] = rows
               .map(r => String(r[idx] ?? ''))
               .filter(v => v && v !== 'null' && v !== 'NULL' && v !== 'undefined' && v.length < 300);
@@ -192,17 +211,17 @@ router.post('/scan-database', requireAuth, async (req, res) => {
   const isMongo = (engine || '').toLowerCase().includes('mongo');
   const dbId = parseInt(database_id, 10);
   const cacheKey = `${req.session.id}:${database_id}`;
-  console.log(`[Scan] Scanning ALL ${tables.length} collections for db=${database_id}`);
-  const { scanned, total } = await scanCollections(client, token, dbId, tables, isMongo, cacheKey, 500);
+  console.log(`[Scan] Scanning ALL ${tables.length} collections for db=${database_id} (deep field discovery)`);
+  const { scanned, total } = await scanCollections(client, token, dbId, tables, isMongo, cacheKey, 500, 10, true);
   console.log(`[Scan] Complete: ${scanned}/${total} collections learned (db=${database_id})`);
   res.json({ scanned, total });
 });
 
 // Deep-scan EVERY collection in EVERY database (all servers) — runs in the
 // BACKGROUND (returns immediately) and reports progress via /scan-all-status.
-// Time-boxed; per-DB cap high enough to cover full servers, parallel batches.
-const SCAN_ALL_DEADLINE_MS = 12 * 60 * 1000; // stop after ~12 minutes
-const SCAN_ALL_COLLS_PER_DB = 150;
+// Time-boxed; per-DB cap high enough to cover FULL servers, parallel batches.
+const SCAN_ALL_DEADLINE_MS = 20 * 60 * 1000; // stop after ~20 minutes
+const SCAN_ALL_COLLS_PER_DB = 1000;          // learn every collection in each DB
 
 router.post('/scan-all-databases', requireAuth, async (req, res) => {
   const { client, token } = getClientFromSession(req.session);
