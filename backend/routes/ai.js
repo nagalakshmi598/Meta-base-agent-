@@ -376,13 +376,20 @@ router.post('/query', requireAuth, async (req, res) => {
       try {
         const ql = question.toLowerCase();
 
+        // Is this an AGGREGATE question ("how much / how many processed, conflict,
+        // in-progress", a breakdown, percentages, or several statuses at once)?
+        // If so we must NOT collapse to a single record — the id is being used as
+        // a FOREIGN KEY (e.g. UserId) across many migration records, so we group.
+        const statusMentions = (ql.match(/process(ed)?|conflict|progress|migrat|pending|suspend|not[ _]?process|complet|remaining|transferr|version/gi) || []).length;
+        const wantsAggregate = /\bhow much\b|\bhow many\b|breakdown|aggregate|distribution|percentage|percent|%|\btotal\b|\ball\b|\beach\b|counts?\b|group|summary|report/i.test(ql)
+          || statusMentions >= 2;
+
         // ── SINGLE RECORD BY _id ────────────────────────────────────────────
-        // If the id is a specific document's _id (a 24-hex ObjectId), answer THAT
-        // one record's exact status — not a diluted aggregate across collections.
-        // _id is indexed, so probing candidates is fast. This is what makes
-        // "what is the process status of this <id>" return the real value (e.g.
-        // CONFLICT) instead of a 33/33/33 split.
-        if (filter.type === 'id' && /^[0-9a-f]{24}$/i.test(filter.value)) {
+        // If the id is a specific document's _id (a 24-hex ObjectId) AND the user
+        // wants that ONE record (not an aggregate), answer that record's exact
+        // status — e.g. "what is the process status of this <messageId>". Skipped
+        // for aggregate asks so a user/workspace id isn't mistaken for a profile.
+        if (filter.type === 'id' && /^[0-9a-f]{24}$/i.test(filter.value) && !wantsAggregate) {
           const idCands = getTopCollections(question, schema, 12, scanData).map(t => enrichTableFields(t, scanData));
           const hits = await mapLimit(idCands, 6, async (cand) => {
             const r = await runNativeSafe(JSON.stringify([{ '$match': { _id: { '$oid': filter.value } } }, { '$limit': 1 }]), cand.name);
@@ -448,7 +455,15 @@ router.post('/query', requireAuth, async (req, res) => {
             queryStr: JSON.stringify(pipeline, null, 2),
           } : null;
         });
-        const withData = probed.filter(Boolean).sort((a, b) => b.total - a.total);
+        let withData = probed.filter(Boolean).sort((a, b) => b.total - a.total);
+        // Keep only MIGRATION collections: their status values must look like
+        // migration statuses (PROCESSED/CONFLICT/IN_PROGRESS/…), not a profile flag
+        // like true/false. This stops a Users/profile doc (matched by _id) from
+        // polluting a migration breakdown for a foreign-key id (e.g. UserId).
+        const looksMigration = sv => (sv || []).some(s =>
+          /process|conflict|progress|migrat|complet|pending|suspend|fail|queue|not[ _]?process|transferr|moved|\bdone\b|version|no[_ ]?message|resume|skip|success|error|retry/i.test(String(s.value)));
+        const migrationOnly = withData.filter(c => looksMigration(c.statusValues));
+        if (migrationOnly.length) withData = migrationOnly;   // drop non-migration noise
         if (withData.length) {
           // Pass 2 — timeline (for the ETA) + files/folders split, but only for the
           // few BIGGEST collections (they drive the rate and the type split), and
