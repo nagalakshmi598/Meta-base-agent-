@@ -4,7 +4,7 @@ import type { Database, Schema, Message } from '../types';
 const api = axios.create({
   baseURL: '/api',
   withCredentials: true,
-  timeout: 120000, // 2 min for slow AI queries
+  timeout: 180000, // 3 min — large multi-collection reports scan big collections
   headers: { 'Content-Type': 'application/json' }
 });
 

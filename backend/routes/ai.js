@@ -433,7 +433,7 @@ router.post('/query', requireAuth, async (req, res) => {
         const timeLeft = () => REPORT_BUDGET_MS - (Date.now() - reportStart);
         // Prefer collections the scan shows actually have a status field + data,
         // so we don't waste scans on unrelated collections.
-        const fcCands = getTopCollections(`${question} status migrated processed in progress conflict files folders collaboration`, schema, 10, scanData)
+        const fcCands = getTopCollections(`${question} status migrated processed in progress conflict files folders collaboration`, schema, 8, scanData)
           .map(t => enrichTableFields(t, scanData));
         // Pass 1 — probe each candidate with the SAME simple $match + $group the
         // user validated, at most 4 at a time. Keep every collection with data.

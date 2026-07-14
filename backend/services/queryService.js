@@ -608,13 +608,39 @@ export function findTimeField(fields = []) {
       || null;
 }
 
-// Build a MongoDB $match that finds a document by an id VALUE across every
-// id-like field (workSpaceId, uniqueWorkSpaceId, messageMoveWorkSpaceId, jobId…)
-// plus the _id ObjectId — only the field that actually holds it matches.
+// Build a MongoDB $match that finds a document by an id VALUE. Matching EVERY
+// id-like field is a full collection scan per field (very slow on big
+// collections), so we match the CONTEXT-relevant id field(s) when the question
+// names the entity ("userId", "workspace", "job"…), plus the _id ObjectId. Only
+// when we can't tell do we fall back to a small set of id fields.
 export function buildIdMatchCondition(fields = [], value, question = '') {
   const is24hex = /^[0-9a-f]{24}$/i.test(value);
   const idFields = fields.map(f => f.name).filter(n => /id$/i.test(n) && n.toLowerCase() !== '_id');
-  const conds = idFields.map(n => ({ [n]: value }));
+  const q = (question || '').toLowerCase();
+
+  // Rank id fields by how well they fit the entity named in the question.
+  const groups = [];
+  if (/\buser|owner|member|agent|people|person|email\b/.test(q)) groups.push(/^user_?id$/i, /owner.*id$/i, /member_?id$/i, /agent_?id$/i);
+  if (/workspace|wsid|\bspace\b|tenant|org/.test(q))              groups.push(/workspace_?id$/i, /movework.*id$/i, /uniquework.*id$/i, /space_?id$/i);
+  if (/\bjob\b/.test(q))                                          groups.push(/job_?id$/i);
+  if (/channel|room/.test(q))                                     groups.push(/channel_?id$/i, /srcchannelid$/i);
+  if (/message|msg|chat|conversation/.test(q))                    groups.push(/message.*id$/i, /msg.*id$/i);
+  if (/migration|migrat|transfer/.test(q))                        groups.push(/migration_?id$/i, /transfer_?id$/i);
+  const rank = n => { for (let i = 0; i < groups.length; i++) if (groups[i].test(n)) return groups.length - i; return -1; };
+
+  const matched = idFields.filter(n => rank(n) >= 0).sort((a, b) => rank(b) - rank(a));
+
+  let picked;
+  if (matched.length) {
+    picked = matched.slice(0, 3);            // context is clear → just those fields
+  } else {
+    // No entity context — use a bounded set of the most common id fields so the
+    // $or stays cheap instead of scanning on every id field.
+    const common = idFields.filter(n => /^(user|owner|workspace|movework|uniquework|job|channel|message|migration|transfer).*id$/i.test(n));
+    picked = (common.length ? common : idFields).slice(0, 4);
+  }
+
+  const conds = picked.map(n => ({ [n]: value }));
   if (is24hex) conds.push({ _id: { '$oid': value } });
   if (!conds.length) conds.push({ [findMatchingIdField(fields, question) || '_id']: value });
   return conds.length === 1 ? conds[0] : { '$or': conds };
