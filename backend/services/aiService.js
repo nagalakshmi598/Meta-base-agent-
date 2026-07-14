@@ -665,6 +665,57 @@ export async function answerFromDocs(question) {
   }
 }
 
+// Explain what a specific COLLECTION is used for, by reading its REAL structure
+// from Metabase (scanned fields, sample values, status vocabulary, size) and
+// having the LLM translate that into a plain-English purpose — no documentation
+// required. This answers "what is the use of the X collection".
+export async function explainCollectionPurpose(name, schema, scanData = new Map()) {
+  const table = (schema?.tables || []).find(t => (t.name || '').toLowerCase() === String(name).toLowerCase()) || { name };
+  const scan = (scanData.get?.(name)) || {};
+  const declared = (table.fields || []).map(f => f.name);
+  const cols = declared.length ? declared : (scan.cols || []);
+  const statusInfo = (scan.statusField && Array.isArray(scan.statusValues) && scan.statusValues.length)
+    ? `${scan.statusField}: ${scan.statusValues.slice(0, 15).map(s => `${s.value}=${s.count}`).join(', ')}`
+    : '';
+  const samples = [];
+  if (scan.sampleValues) {
+    for (const [f, vals] of Object.entries(scan.sampleValues)) {
+      if (vals && vals.length && samples.length < 12) samples.push(`${f}=${JSON.stringify(String(vals[0]).slice(0, 40))}`);
+    }
+  }
+  const docCount = typeof scan.docCount === 'number' ? scan.docCount : null;
+
+  const ai = await client();
+  if (!ai) {
+    // No LLM → deterministic description from the real structure.
+    const parts = [`The **${name}** collection`];
+    if (docCount != null) parts.push(`holds about **${docCount.toLocaleString('en-US')}** documents`);
+    parts.push(`with fields: ${cols.slice(0, 30).join(', ') || '(unknown)'}`);
+    let out = parts.join(' ') + '.';
+    if (statusInfo) out += `\n\nIts status values (${scan.statusField}): ${statusInfo}.`;
+    return out;
+  }
+
+  const system = `You are the CloudFuze Migration Intelligence assistant. Explain, in clear human language, what a MongoDB collection is USED FOR — based ONLY on the real structure provided (field names, sample values, status vocabulary, document count).
+- Infer its role in the CloudFuze cloud-migration pipeline (workspaces, files, folders, messages, channels, users, permissions, jobs, metadata, links, prescan, etc.) from its name and fields.
+- Explain the KEY fields and, if a status field is present, what its values mean for migration.
+- Mention the size (document count) if given.
+- Do NOT invent fields or values that aren't listed. Be concise, concrete, and useful.`;
+  const ctx = `COLLECTION: ${name}
+DATABASE: ${schema?.name || ''}
+DOCUMENT COUNT: ${docCount != null ? docCount : 'unknown'}
+FIELDS (${cols.length}): ${cols.slice(0, 60).join(', ') || '(none captured)'}
+${statusInfo ? `STATUS VALUES → ${statusInfo}` : ''}
+${samples.length ? `SAMPLE VALUES → ${samples.join(', ')}` : ''}`;
+  try {
+    const text = await llmChat({ max_tokens: 900, system, messages: [{ role: 'user', content: `${ctx}\n\nExplain what the "${name}" collection is used for in CloudFuze.` }] });
+    return text || null;
+  } catch (e) {
+    handleApiError(e, 'explainCollectionPurpose');
+    return null;
+  }
+}
+
 // Answer a question about one or more attached images (screenshots of the
 // Metabase dashboard, a collection, an error, migration data, etc.) using the
 // vision-capable LLM. Returns null if no LLM is available.

@@ -3,7 +3,7 @@ import { getClientFromSession } from '../services/metabaseService.js';
 import {
   generateSQL, interpretResults, suggestQuestions, explainSQL,
   isAIAvailable, directAnswer, planWithLLM, synthesizeAnswer,
-  answerVisionQuestion, answerFromDocs
+  answerVisionQuestion, answerFromDocs, explainCollectionPurpose
 } from '../services/aiService.js';
 import { reloadDocs, getDocsCount } from '../services/docsService.js';
 import {
@@ -331,6 +331,28 @@ router.post('/query', requireAuth, async (req, res) => {
         answer: `That result came from the ${noun} ${list} in the **${schema.name}** database.`,
         mode: 'ai', query_type: 'meta', tables_used: lastColls, collection: lastColls[0]
       });
+    }
+  }
+
+  // "What is the use / purpose of the <X> collection?" — EXPLAIN a collection by
+  // reading its real structure from Metabase (scanned fields, sample values,
+  // status vocabulary, size) and having the LLM translate it into plain English.
+  // Not a documentation lookup, not a data query.
+  if (isAIAvailable()) {
+    const ql = question.toLowerCase();
+    const explainIntent = /\b(what (is|are|does)|what.?s|use of|used for|purpose|meaning of|explain|describe|tell me about|role of|function of|about the|why .* (collection|table))\b/i.test(ql);
+    const mentionsColl = /\b(collection|table)\b/i.test(ql);
+    const notData = !/how many|how much|\bcount\b|list |show me all|breakdown|status of|processed|conflict|migrat|when will|percentage|group by|which (collection|table)/i.test(ql);
+    if (explainIntent && mentionsColl && notData) {
+      const top = getTopCollections(question, schema, 1, scanData)[0];
+      if (top) {
+        try {
+          const answer = await explainCollectionPurpose(top.name, schema, scanData);
+          if (answer) {
+            return res.json({ answer, mode: 'ai', query_type: 'schema_explain', collection: top.name, tables_used: [top.name] });
+          }
+        } catch (e) { console.warn('[Explain] failed:', e.message); }
+      }
     }
   }
 
