@@ -605,7 +605,14 @@ router.post('/query', requireAuth, async (req, res) => {
         let primaryResult = null, primaryQuery = null, primaryCollection = null;
 
         for (const sq of plan.sub_questions) {
-          const intent = sq.intent || 'data_query';
+          let intent = sq.intent || 'data_query';
+          // Guard: if the LLM mislabeled a real DATA question as "list databases"
+          // or "list collections", treat it as a data_query so we answer from the
+          // selected database instead of dumping the server/collection list.
+          if ((intent === 'list_databases' || intent === 'schema_list')
+              && /\bmigrat|process|conflict|status|how much|how many|\brecord|\bfiles?\b|\bfolders?\b|messages?|\busers?\b|workspace|count|breakdown|percentage|\berror|reason|when will|\bwsid\b|[0-9a-f]{16,}/i.test(`${sq.text || ''} ${question}`)) {
+            intent = 'data_query';
+          }
 
           if (intent === 'data_query') {
             // DETERMINISTIC collection + query: the keyword scorer picks the right

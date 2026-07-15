@@ -108,7 +108,12 @@ router.get('/collections', requireAuth, async (req, res) => {
 // Reads sample rows from each collection (fields + real values) so routing and
 // answers use real data. Scans in PARALLEL batches so even 100+ collections are
 // learned quickly. Shared by /scan-database (one DB) and /scan-all-databases.
-async function scanCollections(client, token, dbId, tableNames, isMongo, cacheKey, cap = 300, batchSize = 10, deep = false) {
+// `light` = catalog mode: ONE sample query per collection (fields only), no
+//   count/status/field-discovery — used by the all-servers background scan so it
+//   finishes fast and doesn't starve the user's live queries.
+// `deep` = full mode: sample + count + status vocabulary + field discovery —
+//   used when the user selects a database (the one they'll actually query).
+async function scanCollections(client, token, dbId, tableNames, isMongo, cacheKey, cap = 300, batchSize = 10, deep = false, light = false) {
   const tableList = (tableNames || []).slice(0, cap);
   let scanned = 0;
   for (let i = 0; i < tableList.length; i += batchSize) {
@@ -121,22 +126,19 @@ async function scanCollections(client, token, dbId, tableNames, isMongo, cacheKe
         const sampleQuery = isMongo
           ? { query: JSON.stringify([{ '$limit': 15 }]), collection: tableName, template_tags: {} }
           : { query: `SELECT * FROM "${tableName}" LIMIT 15`, template_tags: {} };
-        // The TRUE document count — read in PARALLEL with the sample so the agent
-        // knows each collection's real volume (a 6-doc side-table vs a 96,000-doc
-        // main table). Runs concurrently, so it adds little wall-clock. If the
-        // count times out we still keep the sample (docCount just stays unknown).
-        const countQuery = isMongo
+        // The TRUE document count — read in PARALLEL with the sample (skipped in
+        // light/catalog mode). If it times out we still keep the sample.
+        const countQuery = (!light && isMongo)
           ? { query: JSON.stringify([{ '$count': 'n' }]), collection: tableName, template_tags: {} }
-          : { query: `SELECT COUNT(*) AS n FROM "${tableName}"`, template_tags: {} };
+          : (!light ? { query: `SELECT COUNT(*) AS n FROM "${tableName}"`, template_tags: {} } : null);
         // DEEP field discovery (Mongo only): union EVERY top-level field name
         // across a 200-doc sample, so schema-varying documents don't hide fields.
-        // Enabled for the single-DB scan (the DB the user is actively querying).
         const fieldsQuery = (deep && isMongo)
           ? { query: JSON.stringify([{ '$limit': 200 }, { '$project': { kv: { '$objectToArray': '$$ROOT' } } }, { '$unwind': '$kv' }, { '$group': { '_id': '$kv.k' } }, { '$limit': 800 }]), collection: tableName, template_tags: {} }
           : null;
         const [result, countRes, fieldsRes] = await Promise.all([
           client.post(token, '/api/dataset', { type: 'native', native: sampleQuery, database: dbId }),
-          client.post(token, '/api/dataset', { type: 'native', native: countQuery, database: dbId }).catch(() => null),
+          countQuery ? client.post(token, '/api/dataset', { type: 'native', native: countQuery, database: dbId }).catch(() => null) : Promise.resolve(null),
           fieldsQuery ? client.post(token, '/api/dataset', { type: 'native', native: fieldsQuery, database: dbId }).catch(() => null) : Promise.resolve(null),
         ]);
         if (!result.error && result.data?.rows?.length > 0) {
@@ -173,7 +175,7 @@ async function scanCollections(client, token, dbId, tableNames, isMongo, cacheKe
           // collection, run in the background scan only.
           const statusField = pickStatusFieldName(cols);
           let statusValues; // [{ value, count }] sorted desc
-          if (statusField) {
+          if (statusField && !light) {
             try {
               const groupQuery = isMongo
                 ? { query: JSON.stringify([
@@ -259,7 +261,9 @@ router.post('/scan-all-databases', requireAuth, async (req, res) => {
       const tableNames = (db.tables || []).map(t => t.name);
       const cacheKey = `${sessionId}:${db.id}`;
       try {
-        const { scanned } = await scanCollections(client, token, db.id, tableNames, isMongo, cacheKey, SCAN_ALL_COLLS_PER_DB);
+        // LIGHT + bigger batches: one sample query per collection, 20 in flight.
+        // Fast catalog/field learning that doesn't starve the user's live queries.
+        const { scanned } = await scanCollections(client, token, db.id, tableNames, isMongo, cacheKey, SCAN_ALL_COLLS_PER_DB, 20, false, true);
         collectionsScanned += scanned;
       } catch (e) { /* skip this DB, keep going */ }
       dbDone++;
