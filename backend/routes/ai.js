@@ -267,41 +267,46 @@ router.post('/query', requireAuth, async (req, res) => {
   const scanCacheKey = `${req.session.id}:${database_id}`;
   const scanData     = getScanData(scanCacheKey);
 
-  // Build the global catalog of ALL databases/servers once per session (a single
-  // fast metadata call — no data-layer hits — so the agent knows every server).
-  let catalog = getCatalog(req.session.id);
-  if (!catalog.length) {
+  // Only questions that are ABOUT databases/servers or saved queries need those
+  // metadata calls. For a normal data question we DON'T block the answer on them —
+  // the catalog is learned in the background so future catalog questions are fast.
+  const qLower = (question || '').toLowerCase();
+  const catalogRelevant = /\b(databases?|servers?)\b/.test(qLower);
+  const savedRelevant = /\bsaved\b|(what|which|list|show|how many)[^?]*\b(quer(y|ies)|questions?|cards?|reports?|dashboards?)\b/.test(qLower);
+
+  const buildCatalog = async () => {
     try {
       const dbsResp = await mbClient.get(token, '/api/database', { include: 'tables' });
       const dbList  = Array.isArray(dbsResp) ? dbsResp : dbsResp.data || [];
-      catalog = dbList.filter(d => !d.is_sample).map(d => ({
-        id: d.id, name: d.name, engine: d.engine,
-        collections: (d.tables || []).map(t => t.name)
+      const c = dbList.filter(d => !d.is_sample).map(d => ({
+        id: d.id, name: d.name, engine: d.engine, collections: (d.tables || []).map(t => t.name)
       }));
-      setCatalog(req.session.id, catalog);
-      console.log(`[Catalog] Learned ${catalog.length} databases (servers)`);
-    } catch (e) { console.warn('[Catalog] build failed:', e.message); }
+      setCatalog(req.session.id, c);
+      return c;
+    } catch (e) { console.warn('[Catalog] build failed:', e.message); return []; }
+  };
+
+  let catalog = getCatalog(req.session.id);
+  if (!catalog.length) {
+    if (catalogRelevant) catalog = await buildCatalog();       // needed to answer → wait
+    else buildCatalog().catch(() => {});                        // background → don't delay
   }
 
-  // Read the saved Metabase Questions/Cards (pre-built queries) once per session.
-  // This is a reliable metadata call (not the flaky Mongo data layer).
+  // Saved Metabase questions — only fetched when the question is about them.
   let savedQueries = getSavedQueries(req.session.id);
-  if (!savedQueries.length) {
+  if (!savedQueries.length && savedRelevant) {
     try {
       const cardsResp = await mbClient.get(token, '/api/card', { f: 'all' });
       const cards = Array.isArray(cardsResp) ? cardsResp : cardsResp.data || [];
       const dbName = id => (catalog.find(d => d.id === id)?.name) || '';
       savedQueries = cards.filter(c => c && !c.archived).slice(0, 300).map(c => ({
-        id: c.id,
-        name: c.name,
-        description: c.description || '',
+        id: c.id, name: c.name, description: c.description || '',
         databaseId: c.database_id || c.dataset_query?.database,
         dbName: dbName(c.database_id || c.dataset_query?.database),
         collection: c.dataset_query?.native?.collection || '',
         native: (c.dataset_query?.native?.query || '').slice(0, 500)
       }));
       setSavedQueries(req.session.id, savedQueries);
-      console.log(`[SavedQueries] Learned ${savedQueries.length} saved Metabase questions`);
     } catch (e) { console.warn('[SavedQueries] fetch failed:', e.message); }
   }
 
