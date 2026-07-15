@@ -3,6 +3,39 @@ export function isMongoDB(schema) {
   return engine.includes('mongo');
 }
 
+// The AUTHORITATIVE collections that hold CONTENT migration data. "How much data
+// migrated" must aggregate across THESE — not the biggest collection or a guess.
+// (Files live in FileFolderInfo; folders in FolderMetadataInfo; plus
+// collaboration, hyperlinks, and drive-change records.)
+export const CONTENT_COLLECTION_PATTERNS = [
+  /^filefolderinfo$/i,
+  /^foldermetadata?info$/i,
+  /^collab.?rationdetails$/i,   // CollabarationDetails (their spelling) or CollaborationDetails
+  /hyperlink/i,
+  /^drivechange.?id.?details$/i,
+];
+
+// Return the content-migration collections that actually exist in this schema,
+// in a sensible order (FileFolderInfo first).
+export function getContentCollections(schema) {
+  const tables = schema?.tables || [];
+  const out = [];
+  for (const pat of CONTENT_COLLECTION_PATTERNS) {
+    for (const t of tables) {
+      if (pat.test(t.name) && !out.includes(t)) out.push(t);
+    }
+  }
+  return out;
+}
+
+// Is the question about CONTENT / "how much data" migration (files, folders,
+// collaborations, hyperlinks) rather than a specific entity count?
+export function isContentQuestion(question) {
+  const q = (question || '').toLowerCase();
+  return /\bhow much data\b|\bdata migrated\b|migrated (so far|till now|already|in this server)|\bcontent\b|files? and folders|entire (data|migration|content)|whole (data|migration)|overall (data|migration|status)|total (data|migration)|all (the )?(data|content)|across (the )?server|in this server\b/i.test(q)
+      || /how much.*(migrat|process|data)/i.test(q);
+}
+
 // Pick the single field that best represents a collection's migration/status
 // state, from a plain list of column names. Used by the deep scan (to know which
 // field to GROUP for the real status vocabulary) and by the query builder. Most

@@ -15,7 +15,7 @@ import {
   isForecastQuestion, extractSpecificFilter, buildIdMatchCondition,
   buildNameMatchCondition, pickStatusFieldName, findTimeField, parseTimestampMs,
   classifyForecastCounts, computeForecast, humanizeDuration, withPercentages,
-  isReasonQuestion
+  isReasonQuestion, getContentCollections, isContentQuestion
 } from '../services/queryService.js';
 import { logQuery, getRecentLogs } from '../services/queryLogService.js';
 
@@ -94,7 +94,9 @@ export function buildSingleDocAnswer(id, collectionName, doc, dbName = '') {
 // percentages, a plain-English summary, the completion ETA, an optional
 // files-vs-folders split, and the collection(s) the data came from.
 export function buildReportAnswer({ filter, statusRows, buckets, fc, statusField, perCollection, timeField, fileFolder, queryStr, typeScope, dbName }) {
-  const label = filter.type === 'id' ? `workspace \`${filter.value}\`` : `**${filter.value}**`;
+  const label = filter.type === 'id' ? `workspace \`${filter.value}\``
+    : filter.type === 'server' ? `the **${filter.value}** server`
+    : `**${filter.value}**`;
   const total = buckets.total || 0;
   const pctOf = n => (total > 0 ? Math.round((n / total) * 1000) / 10 : 0);
   const cols = perCollection || [];
@@ -432,7 +434,15 @@ router.post('/query', requireAuth, async (req, res) => {
         if (f && ['id', 'workspace_name', 'user_name', 'email'].includes(f.type)) { filter = f; break; }
       }
     }
-    if (filter && ['id', 'workspace_name', 'user_name', 'email'].includes(filter.type)) {
+    // Content-migration questions ("how much data migrated…") aggregate the
+    // authoritative CONTENT collections (FileFolderInfo, FolderMetadataInfo,
+    // CollabarationDetails, HyperLinks, DriveChangeIdDetails). These can run
+    // server-wide (no id) — the whole server's content — or filtered to a
+    // workspace/user id.
+    const isContentQ = isContentQuestion(question);
+    const contentColls = getContentCollections(schema);
+    const serverWide = !filter && isContentQ && contentColls.length > 0;
+    if ((filter && ['id', 'workspace_name', 'user_name', 'email'].includes(filter.type)) || serverWide) {
       try {
         const ql = question.toLowerCase();
 
@@ -449,7 +459,7 @@ router.post('/query', requireAuth, async (req, res) => {
         // wants that ONE record (not an aggregate), answer that record's exact
         // status — e.g. "what is the process status of this <messageId>". Skipped
         // for aggregate asks so a user/workspace id isn't mistaken for a profile.
-        if (filter.type === 'id' && /^[0-9a-f]{24}$/i.test(filter.value) && !wantsAggregate) {
+        if (filter && filter.type === 'id' && /^[0-9a-f]{24}$/i.test(filter.value) && !wantsAggregate) {
           const idCands = getTopCollections(question, schema, 12, scanData).map(t => enrichTableFields(t, scanData));
           const hits = await mapLimit(idCands, 6, async (cand) => {
             const r = await runNativeSafe(JSON.stringify([{ '$match': { _id: { '$oid': filter.value } } }, { '$limit': 1 }]), cand.name);
@@ -487,10 +497,12 @@ router.post('/query', requireAuth, async (req, res) => {
         const REPORT_BUDGET_MS = 75000;
         const reportStart = Date.now();
         const timeLeft = () => REPORT_BUDGET_MS - (Date.now() - reportStart);
-        // Prefer collections the scan shows actually have a status field + data,
-        // so we don't waste scans on unrelated collections.
-        const fcCands = getTopCollections(`${question} status migrated processed in progress conflict files folders collaboration`, schema, 8, scanData)
-          .map(t => enrichTableFields(t, scanData));
+        // Candidates: for a CONTENT question use the authoritative content
+        // collections (FileFolderInfo first); otherwise the top-scored ones.
+        const fcCands = ((isContentQ && contentColls.length)
+          ? contentColls
+          : getTopCollections(`${question} status migrated processed in progress conflict files folders collaboration`, schema, 8, scanData)
+        ).map(t => enrichTableFields(t, scanData));
         // Pass 1 — probe each candidate with the SAME simple $match + $group the
         // user validated, at most 4 at a time. Keep every collection with data.
         const probed = await mapLimit(fcCands, 4, async (cand) => {
@@ -498,13 +510,17 @@ router.post('/query', requireAuth, async (req, res) => {
           const flds = cand.fields || [];
           const statusField = pickStatusFieldName(flds.map(f => f.name));
           if (!statusField) return null;
-          const idMatch = filter.type === 'id'
-            ? buildIdMatchCondition(flds, filter.value, question)
-            : buildNameMatchCondition(flds, filter.type, filter.value);
+          // No filter (server-wide) → match the whole collection; else by id/name.
+          const idMatch = !filter ? {}
+            : (filter.type === 'id'
+              ? buildIdMatchCondition(flds, filter.value, question)
+              : buildNameMatchCondition(flds, filter.type, filter.value));
+          const hasId = idMatch && Object.keys(idMatch).length > 0;
           const folderF = flds.find(f => /^folder$/i.test(f.name));
           const typeFilter = folderF ? (wantsFolders ? { [folderF.name]: true } : wantsFiles ? { [folderF.name]: false } : null) : null;
-          const matchStage = typeFilter ? { '$and': [idMatch, typeFilter] } : idMatch;
-          const pipeline = [{ '$match': matchStage }, { '$group': { '_id': `$${statusField}`, 'count': { '$sum': 1 } } }, { '$sort': { 'count': -1 } }];
+          const matchStage = typeFilter ? (hasId ? { '$and': [idMatch, typeFilter] } : typeFilter) : (hasId ? idMatch : null);
+          const groupSort = [{ '$group': { '_id': `$${statusField}`, 'count': { '$sum': 1 } } }, { '$sort': { 'count': -1 } }];
+          const pipeline = matchStage ? [{ '$match': matchStage }, ...groupSort] : groupSort;
           const r = await runNativeSafe(JSON.stringify(pipeline), cand.name);
           if (!r.ok || !(r.data?.rows?.length)) return null;
           const statusValues = r.data.rows.map(row => ({ value: row[0], count: Number(row[row.length - 1]) || 0 }));
@@ -578,7 +594,7 @@ router.post('/query', requireAuth, async (req, res) => {
           const fc = computeForecast({ processed: buckets.processed, remaining: buckets.remaining, firstMs, lastMs, nowMs: Date.now() });
           const perCollection = withData.map(c => ({ name: c.name, total: c.total, buckets: classifyForecastCounts(c.statusValues) }));
           const answer = buildReportAnswer({
-            filter, statusRows, buckets, fc, statusField: withData[0].statusField,
+            filter: filter || { type: 'server', value: schema.name }, statusRows, buckets, fc, statusField: withData[0].statusField,
             perCollection, timeField, fileFolder, queryStr: withData[0].queryStr, typeScope, dbName: schema.name
           });
           console.log(`[Report] ${withData.length} collections merged: total=${buckets.total} processed=${buckets.processed} remaining=${buckets.remaining} eta_ok=${fc.ok}`);
