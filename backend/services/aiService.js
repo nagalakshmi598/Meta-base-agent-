@@ -520,7 +520,8 @@ CONVERSATION MEMORY (today is ${today}):
 }
 
 // Combine all gathered sub-answers/data into one human, elaborate response.
-export async function synthesizeAnswer(originalQuestion, parts, history = []) {
+export async function synthesizeAnswer(originalQuestion, parts, history = [], dbName = '') {
+  const dbTag = dbName ? ` in the \`${dbName}\` database` : '';
   const staticJoin = () => parts.map(p => {
     const head = parts.length > 1 ? `### ${p.text}\n` : '';
     if (p.rows && p.headers && p.rows.length) {
@@ -552,7 +553,7 @@ export async function synthesizeAnswer(originalQuestion, parts, history = []) {
     const isWhy = isReasonQuestion(originalQuestion || '');
     if (!isWhy && p.intent === 'data_query' && scalar != null && (typeof scalar === 'number' || /^\d+$/.test(String(scalar)))) {
       const n = typeof scalar === 'number' ? scalar : parseInt(scalar, 10);
-      return `**${n.toLocaleString('en-US')}** — that's the exact count for _"${(originalQuestion || '').trim()}"_ (from the \`${p.collection}\` collection).\n\nAsk for a **breakdown** or the **conflict/failure reasons** if you'd like more detail.`;
+      return `**${n.toLocaleString('en-US')}** — that's the exact count for _"${(originalQuestion || '').trim()}"_.\n\n_📂 Data source: \`${p.collection}\` collection${dbTag}._\n\nAsk for a **breakdown** or the **conflict/failure reasons** if you'd like more detail.`;
     }
   }
 
@@ -623,8 +624,9 @@ WHEN THE DATA CONTAINS ERRORS / CONFLICT REASONS (e.g. a "why did it fail/confli
   // when the answer text doesn't already name them.
   const sourceFooter = (text) => {
     const colls = [...new Set(parts.filter(p => p.rows && p.rows.length && p.collection).map(p => p.collection))];
-    const missing = colls.filter(c => !String(text || '').includes(c));
-    return missing.length ? `\n\n_📂 Data source: ${missing.map(c => `\`${c}\``).join(', ')}_` : '';
+    if (!colls.length) return '';
+    const list = colls.map(c => `\`${c}\``).join(', ');
+    return `\n\n_📂 Data source: ${list} collection${colls.length > 1 ? 's' : ''}${dbTag}._`;
   };
 
   try {

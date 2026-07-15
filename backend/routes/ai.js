@@ -54,7 +54,7 @@ async function mapLimit(items, limit, fn) {
 // Answer for ONE specific record found by its _id (e.g. "what is the process
 // status of this <ObjectId>"). Leads with the exact status and reason, then
 // shows the record's key fields — deterministic, straight from the document.
-export function buildSingleDocAnswer(id, collectionName, doc) {
+export function buildSingleDocAnswer(id, collectionName, doc, dbName = '') {
   const keys = Object.keys(doc);
   const statusKey = keys.find(k => /^process_?status$|^status$|^state$/i.test(k))
                  || keys.find(k => /status$/i.test(k)) || keys.find(k => /status|state/i.test(k));
@@ -68,7 +68,7 @@ export function buildSingleDocAnswer(id, collectionName, doc) {
     ? `The status of this record is **${status}**.`
     : `Here is the record \`${id}\`.`);
   L.push('');
-  L.push(`_Record \`${id}\` — found in \`${collectionName}\` (matched by \`_id\`)._`);
+  L.push(`_📂 Data source: \`${collectionName}\` collection${dbName ? ` in the \`${dbName}\` database` : ''} — record \`${id}\` (matched by \`_id\`)._`);
   if (err != null && String(err).trim() !== '' && String(err).trim() !== '-') {
     L.push('');
     L.push(`**Reason / error description:** ${String(err).replace(/\|/g, '/')}`);
@@ -93,7 +93,7 @@ export function buildSingleDocAnswer(id, collectionName, doc) {
 // real query + rate math, never invented. Includes: a per-status table with
 // percentages, a plain-English summary, the completion ETA, an optional
 // files-vs-folders split, and the collection(s) the data came from.
-export function buildReportAnswer({ filter, statusRows, buckets, fc, statusField, perCollection, timeField, fileFolder, queryStr, typeScope }) {
+export function buildReportAnswer({ filter, statusRows, buckets, fc, statusField, perCollection, timeField, fileFolder, queryStr, typeScope, dbName }) {
   const label = filter.type === 'id' ? `workspace \`${filter.value}\`` : `**${filter.value}**`;
   const total = buckets.total || 0;
   const pctOf = n => (total > 0 ? Math.round((n / total) * 1000) / 10 : 0);
@@ -168,7 +168,7 @@ export function buildReportAnswer({ filter, statusRows, buckets, fc, statusField
   L.push('');
 
   // Provenance + the exact query, so the user can verify / re-run in Metabase.
-  L.push(`_Grouped by \`${statusField}\` across: ${cols.map(c => `\`${c.name}\``).join(', ')}._`);
+  L.push(`_📂 Data source:${dbName ? ` \`${dbName}\` database →` : ''} ${cols.map(c => `\`${c.name}\``).join(', ')} — grouped by \`${statusField}\`._`);
   if (queryStr) {
     L.push('');
     L.push('**MongoDB query used** (run per collection):');
@@ -462,7 +462,7 @@ router.post('/query', requireAuth, async (req, res) => {
             const doc = {}; cols.forEach((c, i) => { doc[c] = row[i]; });
             console.log(`[Record] _id ${filter.value} found in ${hit.name}`);
             return res.json({
-              answer: buildSingleDocAnswer(filter.value, hit.name, doc),
+              answer: buildSingleDocAnswer(filter.value, hit.name, doc, schema.name),
               mode: 'ai', query_type: 'record', is_mongo: true, collection: hit.name, tables_used: [hit.name],
               sql: JSON.stringify([{ '$match': { _id: { '$oid': filter.value } } }], null, 2),
               results: { cols: hit.data.cols || [], rows: hit.data.rows || [], row_count: hit.data.rows?.length || 0 }
@@ -579,7 +579,7 @@ router.post('/query', requireAuth, async (req, res) => {
           const perCollection = withData.map(c => ({ name: c.name, total: c.total, buckets: classifyForecastCounts(c.statusValues) }));
           const answer = buildReportAnswer({
             filter, statusRows, buckets, fc, statusField: withData[0].statusField,
-            perCollection, timeField, fileFolder, queryStr: withData[0].queryStr, typeScope
+            perCollection, timeField, fileFolder, queryStr: withData[0].queryStr, typeScope, dbName: schema.name
           });
           console.log(`[Report] ${withData.length} collections merged: total=${buckets.total} processed=${buckets.processed} remaining=${buckets.remaining} eta_ok=${fc.ok}`);
           return res.json({
@@ -752,7 +752,7 @@ router.post('/query', requireAuth, async (req, res) => {
           }
         }
 
-        const answer = await synthesizeAnswer(question, parts, history);
+        const answer = await synthesizeAnswer(question, parts, history, schema.name);
 
         return res.json({
           sql: primaryQuery || undefined,
