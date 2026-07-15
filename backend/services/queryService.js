@@ -3,20 +3,40 @@ export function isMongoDB(schema) {
   return engine.includes('mongo');
 }
 
-// The AUTHORITATIVE collections that hold CONTENT migration data. "How much data
+// The AUTHORITATIVE collections that hold migration data. "How much data
 // migrated" must aggregate across THESE — not the biggest collection or a guess.
-// (Files live in FileFolderInfo; folders in FolderMetadataInfo; plus
-// collaboration, hyperlinks, and drive-change records.)
+// Which ones exist depends on the server type:
+//   • Content / file servers → FileFolderInfo (files), FolderMetadataInfo
+//     (folders), CollabarationDetails, HyperLinks, DriveChangeIdDetails.
+//   • Email servers → Email/Calendar/Contact picking+move/copy queues, info,
+//     folder-info, workspace, and calendar events.
 export const CONTENT_COLLECTION_PATTERNS = [
+  // Content / file migration
   /^filefolderinfo$/i,
   /^foldermetadata?info$/i,
   /^collab.?rationdetails$/i,   // CollabarationDetails (their spelling) or CollaborationDetails
   /hyperlink/i,
   /^drivechange.?id.?details$/i,
+  // Email migration
+  /^email.?picking.?queue$/i,
+  /^email.?folder.?info$/i,
+  /^email.?copy.?queue$/i,
+  /^email.?info$/i,
+  /^email.?work.?space$/i,
+  // Calendar migration
+  /^calendar.?picking.?queue$/i,
+  /^calendar.?move.?queue$/i,
+  /^calendar.?events?$/i,
+  // Contact migration
+  /^contact.?picking.?queue$/i,
+  /^contact.?move.?queue$/i,
+  /^contact.?folder.?info$/i,
+  /^contacts?.?info$/i,
 ];
 
-// Return the content-migration collections that actually exist in this schema,
-// in a sensible order (FileFolderInfo first).
+// Return the authoritative migration-data collections that actually exist in
+// this schema, in the order defined above (so e.g. FileFolderInfo / EmailInfo
+// lead). Only the family matching the current server (file vs email) will match.
 export function getContentCollections(schema) {
   const tables = schema?.tables || [];
   const out = [];
@@ -28,12 +48,14 @@ export function getContentCollections(schema) {
   return out;
 }
 
-// Is the question about CONTENT / "how much data" migration (files, folders,
-// collaborations, hyperlinks) rather than a specific entity count?
+// Is the question about "how much data" migration (files/folders/collaborations/
+// hyperlinks OR emails/calendar/contacts) rather than a specific entity count?
 export function isContentQuestion(question) {
   const q = (question || '').toLowerCase();
   return /\bhow much data\b|\bdata migrated\b|migrated (so far|till now|already|in this server)|\bcontent\b|files? and folders|entire (data|migration|content)|whole (data|migration)|overall (data|migration|status)|total (data|migration)|all (the )?(data|content)|across (the )?server|in this server\b/i.test(q)
-      || /how much.*(migrat|process|data)/i.test(q);
+      || /how much.*(migrat|process|data)/i.test(q)
+      || /how (much|many).*(email|mail|calendar|contact)/i.test(q)
+      || /\b(emails?|mails?|calendar (events?|data)?|contacts?)\b.*(migrat|process|data|status)/i.test(q);
 }
 
 // Pick the single field that best represents a collection's migration/status
