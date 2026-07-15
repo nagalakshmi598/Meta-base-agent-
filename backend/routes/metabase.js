@@ -125,7 +125,7 @@ async function scanCollections(client, token, dbId, tableNames, isMongo, cacheKe
     if (light) {
       let waited = 0;
       while (userRecentlyActive() && waited < 30000) { await sleep(1000); waited += 1000; }
-      await sleep(150);
+      await sleep(40); // tiny gap; the yield above already protects user queries
     }
     const batch = tableList.slice(i, i + batchSize);
     const results = await Promise.all(batch.map(async (tableName) => {
@@ -224,7 +224,7 @@ router.post('/scan-database', requireAuth, async (req, res) => {
   const dbId = parseInt(database_id, 10);
   const cacheKey = `${req.session.id}:${database_id}`;
   console.log(`[Scan] Scanning ALL ${tables.length} collections for db=${database_id} (deep field discovery)`);
-  const { scanned, total } = await scanCollections(client, token, dbId, tables, isMongo, cacheKey, 500, 10, true);
+  const { scanned, total } = await scanCollections(client, token, dbId, tables, isMongo, cacheKey, 500, 15, true);
   console.log(`[Scan] Complete: ${scanned}/${total} collections learned (db=${database_id})`);
   res.json({ scanned, total });
 });
@@ -271,10 +271,10 @@ router.post('/scan-all-databases', requireAuth, async (req, res) => {
       const tableNames = (db.tables || []).map(t => t.name);
       const cacheKey = `${sessionId}:${db.id}`;
       try {
-        // LIGHT mode: one sample query per collection, 8 in flight, and it yields
-        // to live user queries (see scanCollections) — so the catalog keeps
-        // learning in the background without starving the user's questions.
-        const { scanned } = await scanCollections(client, token, db.id, tableNames, isMongo, cacheKey, SCAN_ALL_COLLS_PER_DB, 8, false, true);
+        // LIGHT mode: one sample query per collection, 15 in flight for fast
+        // throughput — and it YIELDS to live user queries (see scanCollections),
+        // so it's quick when idle but never starves the user's questions.
+        const { scanned } = await scanCollections(client, token, db.id, tableNames, isMongo, cacheKey, SCAN_ALL_COLLS_PER_DB, 15, false, true);
         collectionsScanned += scanned;
       } catch (e) { /* skip this DB, keep going */ }
       dbDone++;
