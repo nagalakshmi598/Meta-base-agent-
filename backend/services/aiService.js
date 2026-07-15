@@ -618,16 +618,27 @@ WHEN THE DATA CONTAINS ERRORS / CONFLICT REASONS (e.g. a "why did it fail/confli
 - ALWAYS quote the EXACT error text (e.g. the full ErrorDescription value, including any email/id it mentions) and THEN give the plain-English meaning right after it. The user wants the real reason, verbatim, translated.
 - Status meanings: PROCESSED = completed; PROCESSED_WITH_SOME_CONFLICTS = done but some items conflicted; CONFLICT = blocked by an existing item; FAILED/ERROR = errored; IN_PROGRESS = still running; NO_MESSAGE = source empty.`;
 
+  // A footer naming the collection(s) the data came from, so every answer shows
+  // its source. Appended only for parts that actually returned data, and only
+  // when the answer text doesn't already name them.
+  const sourceFooter = (text) => {
+    const colls = [...new Set(parts.filter(p => p.rows && p.rows.length && p.collection).map(p => p.collection))];
+    const missing = colls.filter(c => !String(text || '').includes(c));
+    return missing.length ? `\n\n_📂 Data source: ${missing.map(c => `\`${c}\``).join(', ')}_` : '';
+  };
+
   try {
     const text = await llmChat({
       max_tokens: 2200,
       system,
       messages: [{ role: 'user', content: `User asked: "${originalQuestion}"\n\nGathered information (this is the ONLY data you may use):\n\n${ctx}\n\nWrite the answer using only this data.` }]
     });
-    return text || staticJoin();
+    const answer = text || staticJoin();
+    return answer + sourceFooter(answer);
   } catch (e) {
     handleApiError(e, 'synthesizeAnswer');
-    return staticJoin();
+    const answer = staticJoin();
+    return answer + sourceFooter(answer);
   }
 }
 
