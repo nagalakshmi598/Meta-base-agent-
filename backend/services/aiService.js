@@ -716,6 +716,57 @@ ${samples.length ? `SAMPLE VALUES → ${samples.join(', ')}` : ''}`;
   }
 }
 
+// Explain ANY concept the user asks about — a status value, a field, or a
+// migration feature (files/folders/messages/permissions/hyperlinks/metadata/
+// prescan/delta) — grounded in BOTH the documentation (incl. the status-enum
+// inventory) and the LIVE schema (collections, fields, real status vocabulary).
+// This is the catch-all for "what is / what does X mean / explain / describe"
+// questions that aren't a specific data query.
+export async function explainAnything(question, schema, scanData = new Map()) {
+  const ai = await client();
+
+  // 1. Relevant documentation (semantic → keyword fallback).
+  let docs = null;
+  try { docs = await searchDocsSemantic(question, 4); } catch { docs = null; }
+  if (!docs || !docs.length) docs = searchDocs(question, 4);
+  const docCtx = (docs || []).map((c, i) => `[doc ${i + 1}] (${c.source})\n${c.text}`).join('\n\n');
+
+  // 2. Live schema context: collections + fields + real status vocabulary.
+  const tables = schema?.tables || [];
+  const schemaLines = [];
+  for (const t of tables) {
+    const scan = scanData.get?.(t.name) || {};
+    const cols = (t.fields || []).map(f => f.name);
+    const list = (cols.length ? cols : (scan.cols || [])).slice(0, 22).join(', ');
+    let line = `• ${t.name}: ${list}`;
+    if (scan.statusField && Array.isArray(scan.statusValues) && scan.statusValues.length) {
+      line += `  [${scan.statusField}: ${scan.statusValues.slice(0, 10).map(s => s.value).join('/')}]`;
+    }
+    schemaLines.push(line);
+    if (schemaLines.join('\n').length > 6000) { schemaLines.push(`…and ${tables.length - schemaLines.length} more collections.`); break; }
+  }
+
+  if (!ai) {
+    return (docs && docs.length)
+      ? `From the documentation (**${docs[0].source}**):\n\n${docs[0].text}`
+      : (schemaLines.length ? `Here are the collections in **${schema?.name}**:\n\n${schemaLines.slice(0, 30).join('\n')}` : null);
+  }
+
+  const system = `You are the CloudFuze Migration Intelligence assistant. Answer the user's "explain / what is / what does this mean" question in clear, human language, grounded ONLY in the DOCUMENTATION and the LIVE DATABASE SCHEMA below.
+- STATUS value (e.g. REPLIES_CONFLICT, VERSION_NOT_PROCESSED, SPACE_NOT_CLOSED): explain what it means for the migration, using the status-enum documentation.
+- FIELD (e.g. ChannelType, processStatus, moveWorkSpaceId): explain what it holds and which collection(s) use it, based on the schema.
+- Migration FEATURE (files, folders, messages, channels, permissions, hyperlinks, metadata, prescan, delta/sync): explain how CloudFuze handles it, grounded in the relevant collections and their statuses.
+- Do NOT invent collections, fields, or status values that aren't shown. If something isn't in the provided context, say what you can reasonably infer and suggest what to ask next. Be concise and concrete.`;
+  const content = `DOCUMENTATION:\n${docCtx || '(none found)'}\n\nDATABASE "${schema?.name}" — COLLECTIONS & FIELDS:\n${schemaLines.join('\n') || '(none)'}\n\nQUESTION: ${question}`;
+  try {
+    const text = await llmChat({ max_tokens: 1000, system, messages: [{ role: 'user', content }] });
+    return text || null;
+  } catch (e) {
+    handleApiError(e, 'explainAnything');
+    return (docs && docs.length) ? `From the documentation (**${docs[0].source}**):\n\n${docs[0].text}` : null;
+  }
+}
+
 // Answer a question about one or more attached images (screenshots of the
 // Metabase dashboard, a collection, an error, migration data, etc.) using the
 // vision-capable LLM. Returns null if no LLM is available.
