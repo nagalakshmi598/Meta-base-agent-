@@ -267,9 +267,16 @@ export function answerCatalogQuestion(sessionId, question) {
     return `I couldn't find a collection matching **"${term}"** in any database. Ask "what databases are available" to see them all.`;
   }
 
-  const asksList = /(what|which|list|show|how many).*(database|server|db)s?\b/.test(q)
-                || /\b(databases|servers)\b.*(available|there|exist|have|connected)/.test(q)
-                || /available (databases|servers)/.test(q);
+  // Only answer "list the databases/servers" when the question is ACTUALLY about
+  // that — not any data question that merely mentions the word "database". Exclude
+  // anything with data intent (migrated/processed/status/count/files/…), so those
+  // are answered from the selected database instead of listing all servers.
+  const dataIntent = /migrat|process|conflict|status|record|\bfiles?\b|\bfolders?\b|messages?|\busers?\b|workspace|how much data|\bcollection|count of|breakdown|percentage|\berror|reason|when will|in[ _]?progress|pending|suspend/i.test(q);
+  const asksList = !dataIntent && (
+       /\b(list|show|what|which|how many)\b[^?]{0,25}\b(databases?|servers?)\b/.test(q)
+    || /\b(databases?|servers?)\b[^?]{0,20}(available|there|exist|connected|do (i|we) have|are (there|connected))/.test(q)
+    || /available\s+(databases?|servers?)/.test(q)
+  );
   if (asksList) {
     const lines = catalog.map(db => {
       const n = (db.collections || []).length;
