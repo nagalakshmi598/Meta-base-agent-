@@ -1,3 +1,11 @@
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const DATA_DIR = path.join(__dirname, '..', 'data');
+const SCAN_FILE = path.join(DATA_DIR, 'scan-cache.json');
+
 export function isMongoDB(schema) {
   const engine = (schema?.engine || '').toLowerCase();
   return engine.includes('mongo');
@@ -230,16 +238,59 @@ export function scoreTable(tableName, question) {
 }
 
 // ── SCAN CACHE: actual sample data from all collections ───────────────────
-// key = "sessionId:dbId" → Map<collectionName, {cols: string[], sampleValues: {field: string[]}}>
+// key = "db:<dbId>" (session-INDEPENDENT so it's shared across users/sessions)
+//   → Map<collectionName, {cols, sampleValues, docCount, statusField, statusValues}>
+// PERSISTED to disk (data/scan-cache.json) so a deploy/restart reuses what was
+// already learned instead of re-reading every collection every time.
 const scanCache = new Map();
+
+// Load persisted scan data on startup (best-effort).
+(function loadScanCache() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(SCAN_FILE, 'utf8'));
+    for (const [key, colls] of Object.entries(raw || {})) {
+      const m = new Map();
+      for (const [name, data] of Object.entries(colls || {})) m.set(name, data);
+      scanCache.set(key, m);
+    }
+    console.log(`[ScanCache] Loaded ${scanCache.size} database(s) from disk`);
+  } catch { /* no cache file yet */ }
+})();
+
+// Debounced write-through so frequent setScanData calls don't thrash the disk.
+let _scanWriteTimer = null;
+function persistScanCache() {
+  if (_scanWriteTimer) return;
+  _scanWriteTimer = setTimeout(() => {
+    _scanWriteTimer = null;
+    try {
+      if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+      const obj = {};
+      for (const [key, m] of scanCache) obj[key] = Object.fromEntries(m);
+      fs.writeFileSync(SCAN_FILE, JSON.stringify(obj), 'utf8');
+    } catch (e) { console.error('[ScanCache] write failed:', e.message); }
+  }, 4000);
+}
 
 export function setScanData(cacheKey, collectionName, data) {
   if (!scanCache.has(cacheKey)) scanCache.set(cacheKey, new Map());
   scanCache.get(cacheKey).set(collectionName, data);
+  persistScanCache();
 }
 
 export function getScanData(cacheKey) {
   return scanCache.get(cacheKey) || new Map();
+}
+
+// Is this collection already learned in the cache? `needDeep` requires the deep
+// details (status vocabulary) so a light-scanned collection is re-read in full
+// when its database is selected. Lets the scan SKIP already-learned collections.
+export function hasScanData(cacheKey, collectionName, needDeep = false) {
+  const c = scanCache.get(cacheKey);
+  const d = c && c.get(collectionName);
+  if (!d || !(d.cols && d.cols.length)) return false;
+  if (needDeep) return d.statusValues !== undefined || d.docCount !== undefined;
+  return true;
 }
 
 export function getScanStatus(cacheKey) {

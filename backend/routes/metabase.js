@@ -1,6 +1,6 @@
 import express from 'express';
 import { getClientFromSession } from '../services/metabaseService.js';
-import { setScanData, setCatalog, setScanProgress, getScanProgress, pickStatusFieldName, userRecentlyActive } from '../services/queryService.js';
+import { setScanData, setCatalog, setScanProgress, getScanProgress, pickStatusFieldName, userRecentlyActive, hasScanData } from '../services/queryService.js';
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -129,6 +129,9 @@ async function scanCollections(client, token, dbId, tableNames, isMongo, cacheKe
     }
     const batch = tableList.slice(i, i + batchSize);
     const results = await Promise.all(batch.map(async (tableName) => {
+      // Already learned? Skip re-reading it (incremental). Deep scan needs the
+      // full detail, so it only skips collections already deep-scanned.
+      if (hasScanData(cacheKey, tableName, deep)) return 1;
       try {
         // Sample more rows (15) so we discover MORE fields — MongoDB documents in
         // the same collection can carry different keys, so a handful of rows would
@@ -222,7 +225,7 @@ router.post('/scan-database', requireAuth, async (req, res) => {
   const { client, token } = getClientFromSession(req.session);
   const isMongo = (engine || '').toLowerCase().includes('mongo');
   const dbId = parseInt(database_id, 10);
-  const cacheKey = `${req.session.id}:${database_id}`;
+  const cacheKey = `db:${database_id}`; // shared + persisted across sessions
   console.log(`[Scan] Scanning ALL ${tables.length} collections for db=${database_id} (deep field discovery)`);
   const { scanned, total } = await scanCollections(client, token, dbId, tables, isMongo, cacheKey, 500, 15, true);
   console.log(`[Scan] Complete: ${scanned}/${total} collections learned (db=${database_id})`);
@@ -269,7 +272,7 @@ router.post('/scan-all-databases', requireAuth, async (req, res) => {
       if (Date.now() > deadline) { console.log('[ScanAll] time budget reached — stopping'); break; }
       const isMongo = (db.engine || '').toLowerCase().includes('mongo');
       const tableNames = (db.tables || []).map(t => t.name);
-      const cacheKey = `${sessionId}:${db.id}`;
+      const cacheKey = `db:${db.id}`; // shared + persisted across sessions
       try {
         // LIGHT mode: one sample query per collection, 15 in flight for fast
         // throughput — and it YIELDS to live user queries (see scanCollections),

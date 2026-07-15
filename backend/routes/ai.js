@@ -264,7 +264,7 @@ router.post('/query', requireAuth, async (req, res) => {
 
   const isMongo      = (schema.engine || '').toLowerCase().includes('mongo');
   const dbId         = parseInt(database_id, 10);
-  const scanCacheKey = `${req.session.id}:${database_id}`;
+  const scanCacheKey = `db:${database_id}`; // session-independent + persisted → shared across sessions
   const scanData     = getScanData(scanCacheKey);
 
   // Only questions that are ABOUT databases/servers or saved queries need those
