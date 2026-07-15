@@ -15,7 +15,7 @@ import {
   isForecastQuestion, extractSpecificFilter, buildIdMatchCondition,
   buildNameMatchCondition, pickStatusFieldName, findTimeField, parseTimestampMs,
   classifyForecastCounts, computeForecast, humanizeDuration, withPercentages,
-  isReasonQuestion, getContentCollections, isContentQuestion
+  isReasonQuestion, getContentCollections, isContentQuestion, markUserActivity
 } from '../services/queryService.js';
 import { logQuery, getRecentLogs } from '../services/queryLogService.js';
 
@@ -384,18 +384,23 @@ router.post('/query', requireAuth, async (req, res) => {
   // Run one native query against Metabase. Returns a normalized result and
   // retries once on a transient MongoDB "server selection" timeout.
   const runNativeSafe = async (queryStr, collection) => {
+    markUserActivity(); // tell the background scan to back off — user query in flight
     const body = {
       type: 'native',
       native: isMongo ? { query: queryStr, collection, template_tags: {} } : { query: queryStr, template_tags: {} },
       database: dbId
     };
-    for (let attempt = 0; attempt < 2; attempt++) {
+    // Up to 3 attempts with backoff — transient Mongo/Metabase timeouts (often
+    // from load) usually clear on retry.
+    const MAX = 3;
+    for (let attempt = 0; attempt < MAX; attempt++) {
       try {
+        markUserActivity();
         const r = await mbClient.post(token, '/api/dataset', body);
         if (r?.error) {
           const msg = String(r.error);
-          if (/tim(e|ed)\s*out|server that matches|UNKNOWN/i.test(msg) && attempt === 0) {
-            await new Promise(res => setTimeout(res, 1500)); continue; // retry once
+          if (/tim(e|ed)\s*out|server that matches|UNKNOWN/i.test(msg) && attempt < MAX - 1) {
+            await new Promise(res => setTimeout(res, 1500 * (attempt + 1))); continue; // backoff + retry
           }
           return { ok: false, error: msg, timedOut: /tim(e|ed)\s*out|server that matches/i.test(msg) };
         }
@@ -403,7 +408,7 @@ router.post('/query', requireAuth, async (req, res) => {
       } catch (e) {
         const msg = String(e.response?.data?.via?.[0]?.error || e.response?.data?.error || e.message || e);
         const timedOut = /tim(e|ed)\s*out|server that matches|ECONNABORTED|UNKNOWN/i.test(msg);
-        if (timedOut && attempt === 0) { await new Promise(res => setTimeout(res, 1500)); continue; }
+        if (timedOut && attempt < MAX - 1) { await new Promise(res => setTimeout(res, 1500 * (attempt + 1))); continue; }
         return { ok: false, error: msg, timedOut };
       }
     }

@@ -3,6 +3,14 @@ export function isMongoDB(schema) {
   return engine.includes('mongo');
 }
 
+// ── USER-QUERY PRIORITY SIGNAL ─────────────────────────────────────────────
+// The background "scan all databases" job competes with live user questions for
+// Metabase capacity. The chat route marks activity here on every query; the scan
+// checks it between batches and backs off, so a user's question is never starved.
+let _lastUserActivityAt = 0;
+export function markUserActivity() { _lastUserActivityAt = Date.now(); }
+export function userRecentlyActive(withinMs = 8000) { return (Date.now() - _lastUserActivityAt) < withinMs; }
+
 // The AUTHORITATIVE collections that hold migration data. "How much data
 // migrated" must aggregate across THESE — not the biggest collection or a guess.
 // Which ones exist depends on the server type:

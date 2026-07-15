@@ -1,6 +1,8 @@
 import express from 'express';
 import { getClientFromSession } from '../services/metabaseService.js';
-import { setScanData, setCatalog, setScanProgress, getScanProgress, pickStatusFieldName } from '../services/queryService.js';
+import { setScanData, setCatalog, setScanProgress, getScanProgress, pickStatusFieldName, userRecentlyActive } from '../services/queryService.js';
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 const router = express.Router();
 
@@ -117,6 +119,14 @@ async function scanCollections(client, token, dbId, tableNames, isMongo, cacheKe
   const tableList = (tableNames || []).slice(0, cap);
   let scanned = 0;
   for (let i = 0; i < tableList.length; i += batchSize) {
+    // The background (light) scan YIELDS to live user queries: if one ran in the
+    // last few seconds, wait for it to finish before hitting Metabase again, then
+    // leave a small gap. Foreground (deep) scan of the selected DB runs full speed.
+    if (light) {
+      let waited = 0;
+      while (userRecentlyActive() && waited < 30000) { await sleep(1000); waited += 1000; }
+      await sleep(150);
+    }
     const batch = tableList.slice(i, i + batchSize);
     const results = await Promise.all(batch.map(async (tableName) => {
       try {
@@ -261,9 +271,10 @@ router.post('/scan-all-databases', requireAuth, async (req, res) => {
       const tableNames = (db.tables || []).map(t => t.name);
       const cacheKey = `${sessionId}:${db.id}`;
       try {
-        // LIGHT + bigger batches: one sample query per collection, 20 in flight.
-        // Fast catalog/field learning that doesn't starve the user's live queries.
-        const { scanned } = await scanCollections(client, token, db.id, tableNames, isMongo, cacheKey, SCAN_ALL_COLLS_PER_DB, 20, false, true);
+        // LIGHT mode: one sample query per collection, 8 in flight, and it yields
+        // to live user queries (see scanCollections) — so the catalog keeps
+        // learning in the background without starving the user's questions.
+        const { scanned } = await scanCollections(client, token, db.id, tableNames, isMongo, cacheKey, SCAN_ALL_COLLS_PER_DB, 8, false, true);
         collectionsScanned += scanned;
       } catch (e) { /* skip this DB, keep going */ }
       dbDone++;
