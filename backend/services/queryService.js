@@ -1196,6 +1196,8 @@ export function answerSchemaNavigation(question, schema) {
 export function isKnowledgeQuestion(question) {
   const q = question.toLowerCase().trim();
   if (/how many|count|total|show me|list (all|the)|give me (all|the)|fetch|find all|get all|number of|display all|select|what is the (status|count|number)/i.test(q)) return false;
+  // Capabilities / help ("what can you do", "what can I ask", "help", "how do I use this")
+  if (/\b(what can (you|i|it)|what (kind|type)s? of|how (do|can) i use|how does this (work|help)|help me|\bhelp\b|capabilities|what are you|who are you|what do you do)\b/i.test(q)) return true;
   return /^(what is|what are|explain|how does|how do|tell me (about|what|how)|describe|why (is|does|are)|what does .+? mean|define|can you explain|overview of|what.*purpose|use of)/i.test(q);
 }
 
@@ -1384,27 +1386,30 @@ Every migration job and individual record has a **status** field tracking its cu
   }
 
   // Default: general assistant overview
-  return `## CloudFuze Intelligence Assistant
+  return `## CloudFuze Metabase Intelligence
 
-I'm connected to your Metabase instance at **mb.syncfuze.com** and can help with:
+I'm connected to your Metabase instance at **metabase.cloudfuze.com** and I read your data directly from every collection. Here's what you can ask:
 
-**Query your migration data:**
-- "How many users are in the cfqamsg database?"
-- "Show workspaces grouped by migration status"
-- "List the most recently migrated messages"
-- "How many workspaces have failed?"
+**Migration status & reports (for a workspace / user / job id):**
+- "How much data migrated for this wsid 6a4f…?" — full breakdown: processed, not-processed, in-progress, conflict, retry, with **percentages**
+- "For this userId … how much processed, conflict, in-progress?" — per-status counts + the aggregate query
+- "When will the remaining data finish?" — an **ETA** based on the processing rate
 
-**Explain CloudFuze concepts:**
-- "What is CloudFuze?" → Platform overview
-- "What are MongoDB collections?" → Database structure
-- "Explain the migration process" → How migrations work
-- "What does the failed status mean?" → Status explanations
+**Diagnose problems:**
+- "Why did it go to conflict? Give me the error description" — reads the real \`ErrorDescription\` and explains it in plain English
 
-**Get schema information:**
-- Select a database from the sidebar to see all available collections and fields
-- Click any collection to expand and view its field names and types
+**Look things up:**
+- "What is the process status of this <record id>?" — the exact status of one record
+- "How many files / folders / messages processed?" — counts, split by type
+- "Show all failed workspaces" · "List recent activity"
 
-Just ask your question in plain English and I'll either query the data or explain the concept!`;
+**Understand the data:**
+- "What is the use of the MessageWorkSpace collection?" — explained from its real fields & statuses
+- "What databases are available?" · "Which server has X?" · "What collections are here?"
+
+**More:** paste screenshots for analysis, and use **Share** to send a chat to a teammate.
+
+Just ask in plain English — I'll query the live data or explain the concept, and show you the exact MongoDB query I ran.`;
 }
 
 export function detectAndAnswerGeneral(question, schema) {
