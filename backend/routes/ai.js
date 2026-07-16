@@ -564,13 +564,27 @@ router.post('/query', requireAuth, async (req, res) => {
           const folderF = flds.find(f => /^folder$/i.test(f.name));
           const typeFilter = folderF ? (wantsFolders ? { [folderF.name]: true } : wantsFiles ? { [folderF.name]: false } : null) : null;
           const matchStage = typeFilter ? (hasId ? { '$and': [idMatch, typeFilter] } : typeFilter) : (hasId ? idMatch : null);
-          const groupSort = [{ '$group': { '_id': `$${statusField}`, 'count': { '$sum': 1 } } }, { '$sort': { 'count': -1 } }];
-          const pipeline = matchStage ? [{ '$match': matchStage }, ...groupSort] : groupSort;
+          // Build the query in Metabase's idiomatic style ($group with an object
+          // _id, then $sort + $project to flatten) so what we display matches
+          // exactly what Metabase runs — users can copy it and validate directly.
+          const groupStages = [
+            { '$group': { '_id': { [statusField]: `$${statusField}` }, 'count': { '$sum': 1 } } },
+            { '$sort': { '_id': 1 } },
+            { '$project': { '_id': false, [statusField]: `$_id.${statusField}`, 'count': true } },
+          ];
+          const pipeline = matchStage ? [{ '$match': matchStage }, ...groupStages] : groupStages;
           // Hard 30s cap per collection so one huge unindexed scan can't hang the
           // whole report — a collection that exceeds it is simply skipped.
           const r = await runNativeSafe(JSON.stringify(pipeline), cand.name, { timeoutMs: 30000, retries: 1 });
           if (!r.ok || !(r.data?.rows?.length)) return null;
-          const statusValues = r.data.rows.map(row => ({ value: row[0], count: Number(row[row.length - 1]) || 0 }));
+          // Parse by COLUMN NAME (order-independent): the status column and `count`.
+          const cnames = (r.data.cols || []).map(c => c.name);
+          const countIdx = cnames.findIndex(n => /^count$/i.test(n));
+          const statusIdx = cnames.findIndex((n, idx) => idx !== countIdx);
+          const statusValues = r.data.rows.map(row => ({
+            value: row[statusIdx >= 0 ? statusIdx : 0],
+            count: Number(row[countIdx >= 0 ? countIdx : row.length - 1]) || 0,
+          }));
           const total = statusValues.reduce((a, s) => a + s.count, 0);
           return total > 0 ? {
             name: cand.name, statusField, statusValues, total, idMatch, matchStage,
