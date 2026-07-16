@@ -3,7 +3,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
   Bot, User, ChevronDown, ChevronRight, Copy, Check,
-  AlertCircle, Table2, Clock, Code2, Pencil
+  AlertCircle, Table2, Clock, Code2, Pencil, Download
 } from 'lucide-react';
 import type { Message, Schema } from '../types';
 
@@ -83,21 +83,55 @@ function ResultsTable({ cols, rows, rowCount }: {
   const totalPages = Math.ceil(rows.length / PAGE_SIZE);
   const displayRows = rows.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
 
+  // Escape one value for CSV (quote if it contains comma/quote/newline).
+  const csvCell = (v: string | number | null) => {
+    if (v === null || v === undefined) return '';
+    const s = String(v);
+    return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+
+  // Build CSV from ALL rows (not just the current page) and download it. A UTF-8
+  // BOM + CRLF line endings so Excel opens it correctly and columns stay aligned.
+  const downloadCsv = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const header = cols.map(c => csvCell(c.display_name || c.name)).join(',');
+    const body = rows.map(r => cols.map((_, j) => csvCell(r[j])).join(',')).join('\r\n');
+    const csv = '﻿' + header + '\r\n' + body;
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+    a.href = url;
+    a.download = `cloudfuze-results-${stamp}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <div className="mt-3 border border-gray-200 rounded-xl overflow-hidden">
-      <button
-        onClick={() => setOpen(o => !o)}
-        className="w-full flex items-center gap-2 px-4 py-2.5 bg-gray-50 hover:bg-gray-100 transition-colors text-left"
-      >
-        <Table2 size={14} className="text-purple-500 flex-shrink-0" />
-        <span className="text-xs font-medium text-gray-600">Raw Results</span>
-        <span className="ml-2 bg-gray-200 text-gray-600 text-xs px-2 py-0.5 rounded-full">
-          {rowCount.toLocaleString()} rows
-        </span>
-        <div className="ml-auto">
+      <div className="w-full flex items-center gap-2 px-4 py-2.5 bg-gray-50 hover:bg-gray-100 transition-colors">
+        <button onClick={() => setOpen(o => !o)} className="flex items-center gap-2 flex-1 text-left min-w-0">
+          <Table2 size={14} className="text-purple-500 flex-shrink-0" />
+          <span className="text-xs font-medium text-gray-600">Raw Results</span>
+          <span className="bg-gray-200 text-gray-600 text-xs px-2 py-0.5 rounded-full">
+            {rowCount.toLocaleString()} rows
+          </span>
+        </button>
+        {rows.length > 0 && (
+          <button
+            onClick={downloadCsv}
+            title="Download all rows as CSV"
+            className="flex items-center gap-1 text-xs font-medium text-[#0129ac] border border-[#0129ac]/30 rounded-md px-2 py-1 hover:bg-[#0129ac]/5 transition-colors flex-shrink-0"
+          >
+            <Download size={13} /> CSV
+          </button>
+        )}
+        <button onClick={() => setOpen(o => !o)} className="flex-shrink-0">
           {open ? <ChevronDown size={14} className="text-gray-400" /> : <ChevronRight size={14} className="text-gray-400" />}
-        </div>
-      </button>
+        </button>
+      </div>
 
       {open && rows.length > 0 && (
         <div>
