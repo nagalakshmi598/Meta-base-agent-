@@ -262,6 +262,7 @@ export default function ChatInterface({
         query_type: result.query_type,
         is_mongo: result.is_mongo,
         collection: result.collection,
+        queries: (result as any).queries,
         results: result.results,
         executionTimeMs: result.execution_time_ms
       });

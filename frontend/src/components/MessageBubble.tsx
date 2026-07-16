@@ -360,9 +360,17 @@ export default function MessageBubble({ message, onEdit }: Props) {
           </div>
         )}
 
-        {/* AI mode: show generated query (collapsible) */}
-        {message.mode === 'ai' && message.sql && (
-          <QueryBlock sql={message.sql} explanation={message.explanation} isMongo={message.is_mongo} collection={message.collection} />
+        {/* AI mode: show the ACTUAL query/queries that ran (collapsible), so the
+            user can validate exactly what executed. Multiple when a report ran a
+            query per collection; otherwise the single generated query. */}
+        {message.mode === 'ai' && message.queries && message.queries.length > 0 ? (
+          message.queries.map((q, i) => (
+            <QueryBlock key={i} sql={q.query} isMongo collection={q.collection} />
+          ))
+        ) : (
+          message.mode === 'ai' && message.sql && (
+            <QueryBlock sql={message.sql} explanation={message.explanation} isMongo={message.is_mongo} collection={message.collection} />
+          )
         )}
 
         {/* AI mode: show raw results (collapsible) */}

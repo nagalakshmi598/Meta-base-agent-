@@ -48,6 +48,7 @@ export interface Message {
   query_type?: string;
   is_mongo?: boolean;
   collection?: string;
+  queries?: { collection: string; query: string }[];
   results?: QueryResults;
   answer?: string;
   timestamp: Date;

@@ -660,6 +660,8 @@ router.post('/query', requireAuth, async (req, res) => {
             answer, mode: 'ai', query_type: 'report',
             sql: withData[0].queryStr, is_mongo: true, collection: withData[0].name,
             tables_used: withData.map(c => c.name),
+            // EVERY query that actually ran — so users can validate each in the UI.
+            queries: withData.map(c => ({ collection: c.name, query: c.queryStr })),
             results: { cols: [{ name: withData[0].statusField }, { name: 'count' }], rows: mergedStatusValues.sort((a, b) => b.count - a.count).map(s => [s.value, s.count]), row_count: mergedStatusValues.length }
           });
         }
