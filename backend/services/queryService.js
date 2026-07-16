@@ -5,6 +5,33 @@ import { fileURLToPath } from 'url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, '..', 'data');
 const SCAN_FILE = path.join(DATA_DIR, 'scan-cache.json');
+const SNAP_FILE = path.join(DATA_DIR, 'report-snapshots.json');
+
+// ── REPORT SNAPSHOTS: remember each report's numbers so re-asking shows the
+// DELTA (migration progress since last check). Persisted across restarts.
+const _snapshots = new Map();
+(function loadSnapshots() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(SNAP_FILE, 'utf8'));
+    for (const [k, v] of Object.entries(raw || {})) _snapshots.set(k, v);
+  } catch { /* none yet */ }
+})();
+let _snapTimer = null;
+function persistSnapshots() {
+  if (_snapTimer) return;
+  _snapTimer = setTimeout(() => {
+    _snapTimer = null;
+    try {
+      if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+      fs.writeFileSync(SNAP_FILE, JSON.stringify(Object.fromEntries(_snapshots)), 'utf8');
+    } catch (e) { console.error('[Snapshots] write failed:', e.message); }
+  }, 2000);
+}
+export function getReportSnapshot(key) { return _snapshots.get(key) || null; }
+export function saveReportSnapshot(key, data, nowIso) {
+  _snapshots.set(key, { ...data, at: nowIso });
+  persistSnapshots();
+}
 
 export function isMongoDB(schema) {
   const engine = (schema?.engine || '').toLowerCase();

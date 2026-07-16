@@ -15,7 +15,8 @@ import {
   isForecastQuestion, extractSpecificFilter, buildIdMatchCondition,
   buildNameMatchCondition, pickStatusFieldName, findTimeField, parseTimestampMs,
   classifyForecastCounts, computeForecast, humanizeDuration, withPercentages,
-  isReasonQuestion, getContentCollections, isContentQuestion, markUserActivity
+  isReasonQuestion, getContentCollections, isContentQuestion, markUserActivity,
+  contentFamiliesFor, getReportSnapshot, saveReportSnapshot
 } from '../services/queryService.js';
 import { logQuery, getRecentLogs } from '../services/queryLogService.js';
 
@@ -93,7 +94,7 @@ export function buildSingleDocAnswer(id, collectionName, doc, dbName = '') {
 // real query + rate math, never invented. Includes: a per-status table with
 // percentages, a plain-English summary, the completion ETA, an optional
 // files-vs-folders split, and the collection(s) the data came from.
-export function buildReportAnswer({ filter, statusRows, buckets, fc, statusField, perCollection, timeField, fileFolder, queryStr, typeScope, dbName }) {
+export function buildReportAnswer({ filter, statusRows, buckets, fc, statusField, perCollection, timeField, fileFolder, queryStr, typeScope, dbName, prev, nowIso }) {
   const label = filter.type === 'id' ? `workspace \`${filter.value}\``
     : filter.type === 'server' ? `the **${filter.value}** server`
     : `**${filter.value}**`;
@@ -129,6 +130,32 @@ export function buildReportAnswer({ filter, statusRows, buckets, fc, statusField
   if (buckets.warning > 0)    L.push(`- ⚡ **Warning:** ${buckets.warning.toLocaleString('en-US')} (${pctOf(buckets.warning)}%)`);
   if (buckets.empty > 0)      L.push(`- ⚪ **No message / empty source:** ${buckets.empty.toLocaleString('en-US')} (${pctOf(buckets.empty)}%)`);
   L.push('');
+
+  // PROGRESS SINCE LAST CHECK — show what changed vs the previous time this exact
+  // report was asked, so the user sees migration progress over time.
+  if (prev && prev.buckets && nowIso && prev.at) {
+    const agoMs = Date.parse(nowIso) - Date.parse(prev.at);
+    const ago = agoMs > 0 ? humanizeDuration(agoMs) : 'a moment';
+    const delta = (cur, was) => {
+      const d = (cur || 0) - (was || 0);
+      if (d > 0) return `**+${d.toLocaleString('en-US')}**`;
+      if (d < 0) return `**${d.toLocaleString('en-US')}**`;
+      return 'no change';
+    };
+    const pb = prev.buckets;
+    const rows = [
+      ['✅ Processed', buckets.processed, pb.processed],
+      ['⏳ Not processed', buckets.notProcessed, pb.notProcessed],
+      ['🔄 In progress', buckets.inProgress, pb.inProgress],
+      ['⚠️ Conflict', buckets.conflict, pb.conflict],
+    ].filter(([, cur, was]) => (cur || 0) !== (was || 0) || true);
+    const changedProcessed = (buckets.processed || 0) - (pb.processed || 0);
+    L.push(`**📈 Progress since your last check (${ago} ago):**`);
+    for (const [labelTxt, cur, was] of rows) L.push(`- ${labelTxt}: ${delta(cur, was)} (now ${(cur || 0).toLocaleString('en-US')})`);
+    if (changedProcessed > 0) L.push(`_➡️ **${changedProcessed.toLocaleString('en-US')}** more items were migrated since last time._`);
+    else if (changedProcessed === 0) L.push(`_➡️ No new items migrated since last time._`);
+    L.push('');
+  }
 
   // Files vs folders split — shown for an UN-scoped report. When the split
   // covers fewer items than the grand total (because only some collections carry
@@ -603,10 +630,21 @@ router.post('/query', requireAuth, async (req, res) => {
 
           const fc = computeForecast({ processed: buckets.processed, remaining: buckets.remaining, firstMs, lastMs, nowMs: Date.now() });
           const perCollection = withData.map(c => ({ name: c.name, total: c.total, buckets: classifyForecastCounts(c.statusValues) }));
+
+          // PROGRESS DELTA: remember this report's numbers keyed by
+          // database + target (workspace/user id or "server") + family, so
+          // re-asking the same question shows what changed since last time.
+          const famKey = isContentQ ? contentFamiliesFor(question).sort().join(',') : 'report';
+          const snapKey = `${database_id}::${(filter && filter.value) || 'server'}::${typeScope || famKey}`;
+          const prevSnap = getReportSnapshot(snapKey);
+          const nowIso = new Date().toISOString();
+
           const answer = buildReportAnswer({
             filter: filter || { type: 'server', value: schema.name }, statusRows, buckets, fc, statusField: withData[0].statusField,
-            perCollection, timeField, fileFolder, queryStr: withData[0].queryStr, typeScope, dbName: schema.name
+            perCollection, timeField, fileFolder, queryStr: withData[0].queryStr, typeScope, dbName: schema.name,
+            prev: prevSnap, nowIso
           });
+          saveReportSnapshot(snapKey, { buckets, total: buckets.total }, nowIso);
           console.log(`[Report] ${withData.length} collections merged: total=${buckets.total} processed=${buckets.processed} remaining=${buckets.remaining} eta_ok=${fc.ok}`);
           return res.json({
             answer, mode: 'ai', query_type: 'report',
