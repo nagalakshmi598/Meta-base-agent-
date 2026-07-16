@@ -90,6 +90,55 @@ export function buildSingleDocAnswer(id, collectionName, doc, dbName = '') {
   return L.join('\n') + followUpsBlock('record') + confidenceLine('high');
 }
 
+// When an id resolves to a single WORKSPACE-SUMMARY document (one whose own
+// fields hold the counts — ProcessedCount, ConflictCount, NotProcessedCount,
+// TotalFilesAndmessage…), the answer is those COUNT FIELDS, not a group-by-status
+// (which would just count 1 document). This matches what you'd read off the doc.
+export function buildSummaryReport(id, collectionName, doc, dbName) {
+  const num = (...names) => {
+    for (const n of names) {
+      const k = Object.keys(doc).find(x => x.toLowerCase() === n.toLowerCase());
+      if (k != null && doc[k] != null && String(doc[k]).trim() !== '') return Number(doc[k]) || 0;
+    }
+    return 0;
+  };
+  const processed = num('ProcessedCount');
+  const notProcessed = num('NotProcessedCount');
+  const inProgress = num('InProgressCount');
+  const conflict = num('ConflictCount');
+  const retry = num('RetryingCount', 'RetryCount');
+  const suspended = num('SuspendedCount');
+  const paused = num('PauseCount', 'PausedCount');
+  const warning = num('WarningCount');
+  const versionProcessed = num('VersionProcessedCount');
+  const versionNotProcessed = num('VersionNotProcessedCount');
+  const totalFiles = num('TotalFiles');
+  const totalMsg = num('TotalMessage', 'TotalMessages');
+  const rows = [
+    ['✅ Processed', processed], ['⏳ Not processed', notProcessed], ['🔄 In progress', inProgress],
+    ['⚠️ Conflict', conflict], ['🔁 Retry', retry], ['⏸️ Suspended', suspended], ['⏸️ Paused', paused],
+    ['⚡ Warning', warning], ['✅ Version processed', versionProcessed], ['⏳ Version not processed', versionNotProcessed],
+  ];
+  const total = num('TotalFilesAndmessage', 'TotalFilesAndMessage', 'TotalItems') || rows.reduce((a, [, v]) => a + v, 0) || 1;
+  const pct = v => Math.round((v / total) * 1000) / 10;
+  const shown = rows.filter(([label, v]) => v > 0 || ['✅ Processed', '⏳ Not processed', '⚠️ Conflict'].includes(label));
+
+  const L = [];
+  L.push(`## Migration summary — workspace \`${id}\``);
+  L.push(`_Read from the \`${collectionName}\` record's own count fields${dbName ? ` in the \`${dbName}\` database` : ''}._`);
+  L.push('');
+  L.push(`| Metric | Count | % of total |`);
+  L.push(`|---|---:|---:|`);
+  for (const [label, v] of shown) L.push(`| ${label} | ${v.toLocaleString('en-US')} | ${pct(v)}% |`);
+  L.push(`| **Total (files + messages)** | **${total.toLocaleString('en-US')}** | **100%** |`);
+  L.push('');
+  L.push(`**In summary:** ✅ **${processed.toLocaleString('en-US')}** processed · ⚠️ **${conflict.toLocaleString('en-US')}** conflict · ⏳ **${notProcessed.toLocaleString('en-US')}** not processed${inProgress ? ` · 🔄 **${inProgress.toLocaleString('en-US')}** in progress` : ''} — out of **${total.toLocaleString('en-US')}** total items.`);
+  if (totalFiles || totalMsg) L.push(`\n_By type: 📄 Files: **${totalFiles.toLocaleString('en-US')}** · 💬 Messages: **${totalMsg.toLocaleString('en-US')}**._`);
+  L.push('');
+  L.push(`_📂 Data source: \`${collectionName}\`${dbName ? ` in the \`${dbName}\` database` : ''} — record \`${id}\` (matched by \`_id\`)._`);
+  return L.join('\n') + followUpsBlock('report') + confidenceLine('high');
+}
+
 // Compose a full, human-agent-style MIGRATION REPORT from the computed numbers.
 // Everything here is DETERMINISTIC — counts, percentages and dates come from the
 // real query + rate math, never invented. Includes: a per-status table with
@@ -499,12 +548,14 @@ router.post('/query', requireAuth, async (req, res) => {
         const wantsAggregate = /\bhow much\b|\bhow many\b|breakdown|aggregate|distribution|percentage|percent|%|\btotal\b|\ball\b|\beach\b|counts?\b|group|summary|report/i.test(ql)
           || statusMentions >= 2;
 
-        // ── SINGLE RECORD BY _id ────────────────────────────────────────────
-        // If the id is a specific document's _id (a 24-hex ObjectId) AND the user
-        // wants that ONE record (not an aggregate), answer that record's exact
-        // status — e.g. "what is the process status of this <messageId>". Skipped
-        // for aggregate asks so a user/workspace id isn't mistaken for a profile.
-        if (filter && filter.type === 'id' && /^[0-9a-f]{24}$/i.test(filter.value) && !wantsAggregate) {
+        // ── SINGLE DOCUMENT BY _id ──────────────────────────────────────────
+        // If the id is a specific document's _id (a 24-hex ObjectId), resolve it:
+        //  • a WORKSPACE-SUMMARY doc (has ProcessedCount/ConflictCount/… fields)
+        //    → report those COUNT FIELDS (not a group-by, which would count 1 doc);
+        //  • otherwise, for a non-aggregate ask → that record's exact status.
+        // If it's not an _id anywhere (a foreign-key id like userId), fall through
+        // to the grouped report below.
+        if (filter && filter.type === 'id' && /^[0-9a-f]{24}$/i.test(filter.value)) {
           const idCands = getTopCollections(question, schema, 12, scanData).map(t => enrichTableFields(t, scanData));
           const hits = await mapLimit(idCands, 6, async (cand) => {
             const r = await runNativeSafe(JSON.stringify([{ '$match': { _id: { '$oid': filter.value } } }, { '$limit': 1 }]), cand.name, { timeoutMs: 12000, retries: 1 });
@@ -515,16 +566,30 @@ router.post('/query', requireAuth, async (req, res) => {
             const cols = (hit.data.cols || []).map(c => c.name);
             const row = hit.data.rows[0];
             const doc = {}; cols.forEach((c, i) => { doc[c] = row[i]; });
-            console.log(`[Record] _id ${filter.value} found in ${hit.name}`);
-            return res.json({
-              answer: buildSingleDocAnswer(filter.value, hit.name, doc, schema.name),
-              mode: 'ai', query_type: 'record', is_mongo: true, collection: hit.name, tables_used: [hit.name],
-              sql: JSON.stringify([{ '$match': { _id: { '$oid': filter.value } } }], null, 2),
-              results: { cols: hit.data.cols || [], rows: hit.data.rows || [], row_count: hit.data.rows?.length || 0 }
-            });
+            // Summary doc? (≥2 migration count fields like ProcessedCount, ConflictCount…)
+            const countKeys = cols.filter(c => /count$/i.test(c) && /process|conflict|progress|suspend|pause|retry|warning|version|fail|migrat/i.test(c));
+            if (countKeys.length >= 2) {
+              console.log(`[Summary] _id ${filter.value} in ${hit.name} — count fields: ${countKeys.join(',')}`);
+              const q = JSON.stringify([{ '$match': { _id: { '$oid': filter.value } } }, { '$project': countKeys.concat(['TotalFilesAndmessage', 'TotalFiles', 'TotalMessage']).reduce((o, k) => (o[k] = true, o), {}) }], null, 2);
+              return res.json({
+                answer: buildSummaryReport(filter.value, hit.name, doc, schema.name),
+                mode: 'ai', query_type: 'report', is_mongo: true, collection: hit.name, tables_used: [hit.name],
+                sql: q, queries: [{ collection: hit.name, query: q }],
+                results: { cols: hit.data.cols || [], rows: hit.data.rows || [], row_count: hit.data.rows?.length || 0 }
+              });
+            }
+            if (!wantsAggregate) {
+              console.log(`[Record] _id ${filter.value} found in ${hit.name}`);
+              return res.json({
+                answer: buildSingleDocAnswer(filter.value, hit.name, doc, schema.name),
+                mode: 'ai', query_type: 'record', is_mongo: true, collection: hit.name, tables_used: [hit.name],
+                sql: JSON.stringify([{ '$match': { _id: { '$oid': filter.value } } }], null, 2),
+                results: { cols: hit.data.cols || [], rows: hit.data.rows || [], row_count: hit.data.rows?.length || 0 }
+              });
+            }
+            // Aggregate ask on a non-summary single doc → fall through to grouped report.
           }
-          // Not an _id anywhere → it's a workspace/foreign id; fall through to the
-          // aggregated report below.
+          // Not an _id anywhere → workspace/foreign id; fall through to grouped report.
         }
 
         // Scope to ONE type only when the user names that type ALONE. "files and
