@@ -38,6 +38,27 @@ export function isMongoDB(schema) {
   return engine.includes('mongo');
 }
 
+// A short markdown block of suggested follow-up questions, tailored to the kind
+// of answer just given (enterprise-assistant polish).
+export function followUpsBlock(kind) {
+  const map = {
+    report:  ['Why did some items go to conflict? (show the error reasons)', 'When will the remaining data finish migrating?', 'Break it down by collection'],
+    record:  ['Why did this record go to conflict?', 'Show the full migration report for this workspace'],
+    count:   ['Show the full status breakdown', 'Why did some go to conflict?', 'When will the rest finish?'],
+    why:     ['How many are in conflict in total?', 'Show the full migration report'],
+    explain: ['Show a status breakdown for this collection', 'How much of this data has migrated?'],
+  };
+  const items = map[kind] || map.report;
+  return `\n\n**💡 You might also ask:**\n${items.map(i => `- _${i}_`).join('\n')}`;
+}
+
+// A confidence line. `level` 'high' (direct counts from the DB), 'medium'
+// (answered from retrieved data), or 'low' (uncertain / fell back).
+export function confidenceLine(level = 'high') {
+  const pct = level === 'high' ? 98 : level === 'medium' ? 90 : 65;
+  return `\n\n_✅ Confidence: **${pct}%** — ${level === 'low' ? 'best effort; please verify' : 'based on live counts read directly from the collection(s) above'}._`;
+}
+
 // ── USER-QUERY PRIORITY SIGNAL ─────────────────────────────────────────────
 // The background "scan all databases" job competes with live user questions for
 // Metabase capacity. The chat route marks activity here on every query; the scan

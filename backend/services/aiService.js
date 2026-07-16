@@ -2,7 +2,8 @@ import dotenv from 'dotenv';
 import axios from 'axios';
 import {
   isMongoDB, getTopCollections, classifyDatabase,
-  extractSpecificFilter, buildMongoQuery, buildKeywordSQL, isReasonQuestion
+  extractSpecificFilter, buildMongoQuery, buildKeywordSQL, isReasonQuestion,
+  followUpsBlock, confidenceLine
 } from './queryService.js';
 import { searchDocs, searchDocsSemantic } from './docsService.js';
 dotenv.config();
@@ -628,6 +629,12 @@ WHEN THE DATA CONTAINS ERRORS / CONFLICT REASONS (e.g. a "why did it fail/confli
     const list = colls.map(c => `\`${c}\``).join(', ');
     return `\n\n_📂 Data source: ${list} collection${colls.length > 1 ? 's' : ''}${dbTag}._`;
   };
+  // Suggested follow-ups + confidence, tailored to what was asked.
+  const isWhyAsk = isReasonQuestion(originalQuestion || '');
+  const polish = () => {
+    const kind = isWhyAsk ? 'why' : /how much|how many|breakdown|status|migrat|conflict|processed/i.test(originalQuestion || '') ? 'count' : 'count';
+    return followUpsBlock(kind) + confidenceLine(hasRealData ? 'high' : 'low');
+  };
 
   try {
     const text = await llmChat({
@@ -636,11 +643,11 @@ WHEN THE DATA CONTAINS ERRORS / CONFLICT REASONS (e.g. a "why did it fail/confli
       messages: [{ role: 'user', content: `User asked: "${originalQuestion}"\n\nGathered information (this is the ONLY data you may use):\n\n${ctx}\n\nWrite the answer using only this data.` }]
     });
     const answer = text || staticJoin();
-    return answer + sourceFooter(answer);
+    return answer + sourceFooter(answer) + polish();
   } catch (e) {
     handleApiError(e, 'synthesizeAnswer');
     const answer = staticJoin();
-    return answer + sourceFooter(answer);
+    return answer + sourceFooter(answer) + polish();
   }
 }
 

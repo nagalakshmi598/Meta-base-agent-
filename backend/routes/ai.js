@@ -16,7 +16,8 @@ import {
   buildNameMatchCondition, pickStatusFieldName, findTimeField, parseTimestampMs,
   classifyForecastCounts, computeForecast, humanizeDuration, withPercentages,
   isReasonQuestion, getContentCollections, isContentQuestion, markUserActivity,
-  contentFamiliesFor, getReportSnapshot, saveReportSnapshot
+  contentFamiliesFor, getReportSnapshot, saveReportSnapshot,
+  followUpsBlock, confidenceLine
 } from '../services/queryService.js';
 import { logQuery, getRecentLogs } from '../services/queryLogService.js';
 
@@ -86,7 +87,7 @@ export function buildSingleDocAnswer(id, collectionName, doc, dbName = '') {
     L.push(`|---|---|`);
     for (const [k, v] of entries) L.push(`| ${k} | ${String(v).replace(/\|/g, '/').replace(/[\r\n]+/g, ' ')} |`);
   }
-  return L.join('\n');
+  return L.join('\n') + followUpsBlock('record') + confidenceLine('high');
 }
 
 // Compose a full, human-agent-style MIGRATION REPORT from the computed numbers.
@@ -205,7 +206,7 @@ export function buildReportAnswer({ filter, statusRows, buckets, fc, statusField
     L.push(queryStr);
     L.push('```');
   }
-  return L.join('\n');
+  return L.join('\n') + followUpsBlock('report') + confidenceLine('high');
 }
 
 router.get('/config', (req, res) => {
