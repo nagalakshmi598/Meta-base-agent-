@@ -26,39 +26,52 @@ export function userRecentlyActive(withinMs = 8000) { return (Date.now() - _last
 //     (folders), CollabarationDetails, HyperLinks, DriveChangeIdDetails.
 //   • Email servers → Email/Calendar/Contact picking+move/copy queues, info,
 //     folder-info, workspace, and calendar events.
-export const CONTENT_COLLECTION_PATTERNS = [
-  // Content / file migration
-  /^filefolderinfo$/i,
-  /^foldermetadata?info$/i,
-  /^collab.?rationdetails$/i,   // CollabarationDetails (their spelling) or CollaborationDetails
-  /hyperlink/i,
-  /^drivechange.?id.?details$/i,
-  // Email migration
-  /^email.?picking.?queue$/i,
-  /^email.?folder.?info$/i,
-  /^email.?copy.?queue$/i,
-  /^email.?info$/i,
-  /^email.?work.?space$/i,
-  // Calendar migration
-  /^calendar.?picking.?queue$/i,
-  /^calendar.?move.?queue$/i,
-  /^calendar.?events?$/i,
-  // Contact migration
-  /^contact.?picking.?queue$/i,
-  /^contact.?move.?queue$/i,
-  /^contact.?folder.?info$/i,
-  /^contacts?.?info$/i,
-];
+// Authoritative migration-data collections, grouped by FAMILY. "How many mails
+// migrated" must count ONLY the email family — not calendar/contacts/files —
+// otherwise unrelated collections (e.g. calendarEvent) inflate the answer.
+export const CONTENT_GROUPS = {
+  file: [
+    /^filefolderinfo$/i, /^foldermetadata?info$/i, /^collab.?rationdetails$/i,
+    /hyperlink/i, /^drivechange.?id.?details$/i,
+  ],
+  email: [
+    /^email.?picking.?queue$/i, /^email.?folder.?info$/i, /^email.?copy.?queue$/i,
+    /^email.?info$/i, /^email.?work.?space$/i,
+  ],
+  calendar: [
+    /^calendar.?picking.?queue$/i, /^calendar.?move.?queue$/i, /^calendar.?events?$/i,
+  ],
+  contact: [
+    /^contact.?picking.?queue$/i, /^contact.?move.?queue$/i, /^contact.?folder.?info$/i,
+    /^contacts?.?info$/i, /^contacts?.?folders?.?info$/i,
+  ],
+};
+export const CONTENT_COLLECTION_PATTERNS = [].concat(...Object.values(CONTENT_GROUPS));
 
-// Return the authoritative migration-data collections that actually exist in
-// this schema, in the order defined above (so e.g. FileFolderInfo / EmailInfo
-// lead). Only the family matching the current server (file vs email) will match.
-export function getContentCollections(schema) {
+// Which families is the question about? mails→email, calendar/events→calendar,
+// contacts→contact, files/folders→file. None mentioned → all families.
+export function contentFamiliesFor(question) {
+  const q = (question || '').toLowerCase();
+  const fams = [];
+  if (/\b(mail|mails|email|emails|message)\b/.test(q)) fams.push('email');
+  if (/\b(calendar|calendars|event|events|meeting)\b/.test(q)) fams.push('calendar');
+  if (/\b(contact|contacts)\b/.test(q)) fams.push('contact');
+  if (/\b(file|files|folder|folders|hyperlink|drive|content|document|docs?)\b/.test(q)) fams.push('file');
+  return fams.length ? fams : ['file', 'email', 'calendar', 'contact'];
+}
+
+// Return the authoritative collections that exist in this schema, scoped to the
+// family/families the QUESTION is about (so a "mails" question returns only email
+// collections). With no question, returns all families present.
+export function getContentCollections(schema, question = '') {
   const tables = schema?.tables || [];
+  const fams = contentFamiliesFor(question);
   const out = [];
-  for (const pat of CONTENT_COLLECTION_PATTERNS) {
-    for (const t of tables) {
-      if (pat.test(t.name) && !out.includes(t)) out.push(t);
+  for (const fam of fams) {
+    for (const pat of (CONTENT_GROUPS[fam] || [])) {
+      for (const t of tables) {
+        if (pat.test(t.name) && !out.includes(t)) out.push(t);
+      }
     }
   }
   return out;

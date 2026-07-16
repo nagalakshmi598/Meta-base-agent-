@@ -450,7 +450,7 @@ router.post('/query', requireAuth, async (req, res) => {
     // server-wide (no id) — the whole server's content — or filtered to a
     // workspace/user id.
     const isContentQ = isContentQuestion(question);
-    const contentColls = getContentCollections(schema);
+    const contentColls = getContentCollections(schema, question); // scoped to the family asked (mails→email only)
     const serverWide = !filter && isContentQ && contentColls.length > 0;
     if ((filter && ['id', 'workspace_name', 'user_name', 'email'].includes(filter.type)) || serverWide) {
       try {

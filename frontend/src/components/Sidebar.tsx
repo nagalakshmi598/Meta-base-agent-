@@ -335,17 +335,18 @@ export default function Sidebar({
               </span>
             </div>
             {/* Connection row */}
-            <div className="flex items-center gap-1">
+            <div className="flex items-center gap-1 mb-2">
               <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
               <span className="text-xs text-gray-400 flex-1 truncate">Connected</span>
-              <button
-                onClick={onDisconnect}
-                title="Disconnect"
-                className="text-gray-400 hover:text-red-500 transition-colors p-1 rounded hover:bg-red-50"
-              >
-                <LogOut size={14} />
-              </button>
             </div>
+            {/* Clear, labeled sign-out button */}
+            <button
+              onClick={onDisconnect}
+              title="Sign out of Metabase"
+              className="w-full flex items-center justify-center gap-2 text-sm font-medium text-gray-600 border border-gray-200 rounded-lg py-2 hover:text-red-600 hover:border-red-200 hover:bg-red-50 transition-colors"
+            >
+              <LogOut size={15} /> Sign out
+            </button>
           </div>
         </aside>
       )}
