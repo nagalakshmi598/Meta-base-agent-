@@ -566,8 +566,11 @@ router.post('/query', requireAuth, async (req, res) => {
             const cols = (hit.data.cols || []).map(c => c.name);
             const row = hit.data.rows[0];
             const doc = {}; cols.forEach((c, i) => { doc[c] = row[i]; });
-            // Summary doc? (≥2 migration count fields like ProcessedCount, ConflictCount…)
-            const countKeys = cols.filter(c => /count$/i.test(c) && /process|conflict|progress|suspend|pause|retry|warning|version|fail|migrat/i.test(c));
+            // Summary doc? Require ≥2 GENUINE migration count fields (ProcessedCount,
+            // ConflictCount, NotProcessedCount, InProgressCount…). Must NOT match a
+            // user/profile doc whose "…Count" fields are auth counters
+            // (failedPasswordCount, failedHintCount) — those aren't migration data.
+            const countKeys = cols.filter(c => /^(processed|not_?processed|conflict|in_?progress|suspended|paused?|retry(ing)?|warning|version_?processed|version_?not_?processed|migrated|transferred|skipped)_?count$/i.test(c));
             if (countKeys.length >= 2) {
               console.log(`[Summary] _id ${filter.value} in ${hit.name} — count fields: ${countKeys.join(',')}`);
               const q = JSON.stringify([{ '$match': { _id: { '$oid': filter.value } } }, { '$project': countKeys.concat(['TotalFilesAndmessage', 'TotalFiles', 'TotalMessage']).reduce((o, k) => (o[k] = true, o), {}) }], null, 2);
