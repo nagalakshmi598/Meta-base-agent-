@@ -820,15 +820,17 @@ export function buildIdMatchCondition(fields = [], value, question = '') {
 
   const matched = idFields.filter(n => rank(n) >= 0).sort((a, b) => rank(b) - rank(a));
 
-  let picked;
-  if (matched.length) {
-    picked = matched.slice(0, 3);            // context is clear → just those fields
-  } else {
-    // No entity context — use a bounded set of the most common id fields so the
-    // $or stays cheap instead of scanning on every id field.
+  // ALWAYS also try the core migration foreign keys (user + workspace), so a
+  // given id is found whether it's a userId OR a workspaceId — even if the
+  // question labels it the "wrong" way ("user id" for a workspace id, etc.).
+  const core = idFields.filter(n => /^(user_?id|owner.*id|work_?space_?id|move_?work_?space_?id|unique_?work_?space_?id|space_?id)$/i.test(n));
+
+  let picked = [...new Set([...matched, ...core])];
+  if (!picked.length) {
     const common = idFields.filter(n => /^(user|owner|workspace|movework|uniquework|job|channel|message|migration|transfer).*id$/i.test(n));
-    picked = (common.length ? common : idFields).slice(0, 4);
+    picked = common.length ? common : idFields;
   }
+  picked = picked.slice(0, 5); // bounded so the $or stays fast (per-query timeout also caps it)
 
   const conds = picked.map(n => ({ [n]: value }));
   if (is24hex) conds.push({ _id: { '$oid': value } });
