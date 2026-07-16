@@ -93,6 +93,12 @@ export const CONTENT_GROUPS = {
     /^contact.?picking.?queue$/i, /^contact.?move.?queue$/i, /^contact.?folder.?info$/i,
     /^contacts?.?info$/i, /^contacts?.?folders?.?info$/i,
   ],
+  // Message/chat migration — the per-MESSAGE detail collection holds the real
+  // volume + status (MESSAGE_STATUS). We use just this one (not the workspace/job
+  // summaries) so counts aren't double-counted across granularities.
+  message: [
+    /^(cf)?message.?each.?files$/i,   // MessageEachFiles / CFMessageEachFiles
+  ],
 };
 export const CONTENT_COLLECTION_PATTERNS = [].concat(...Object.values(CONTENT_GROUPS));
 
@@ -101,11 +107,12 @@ export const CONTENT_COLLECTION_PATTERNS = [].concat(...Object.values(CONTENT_GR
 export function contentFamiliesFor(question) {
   const q = (question || '').toLowerCase();
   const fams = [];
-  if (/\b(mail|mails|email|emails|message)\b/.test(q)) fams.push('email');
+  if (/\b(mail|mails|email|emails)\b/.test(q)) fams.push('email');
+  if (/\b(message|messages|chat|chats|conversation|conversations|\bdm\b|dms|reply|replies)\b/.test(q)) fams.push('message');
   if (/\b(calendar|calendars|event|events|meeting)\b/.test(q)) fams.push('calendar');
   if (/\b(contact|contacts)\b/.test(q)) fams.push('contact');
   if (/\b(file|files|folder|folders|hyperlink|drive|content|document|docs?)\b/.test(q)) fams.push('file');
-  return fams.length ? fams : ['file', 'email', 'calendar', 'contact'];
+  return fams.length ? fams : ['file', 'email', 'message', 'calendar', 'contact'];
 }
 
 // Return the authoritative collections that exist in this schema, scoped to the
