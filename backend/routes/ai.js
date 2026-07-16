@@ -95,7 +95,7 @@ export function buildSingleDocAnswer(id, collectionName, doc, dbName = '') {
 // real query + rate math, never invented. Includes: a per-status table with
 // percentages, a plain-English summary, the completion ETA, an optional
 // files-vs-folders split, and the collection(s) the data came from.
-export function buildReportAnswer({ filter, statusRows, buckets, fc, statusField, perCollection, timeField, fileFolder, queryStr, typeScope, dbName, prev, nowIso }) {
+export function buildReportAnswer({ filter, statusRows, buckets, fc, statusField, perCollection, timeField, fileFolder, queryStr, typeScope, dbName, primaryName, prev, nowIso }) {
   const label = filter.type === 'id' ? `workspace \`${filter.value}\``
     : filter.type === 'server' ? `the **${filter.value}** server`
     : `**${filter.value}**`;
@@ -105,7 +105,7 @@ export function buildReportAnswer({ filter, statusRows, buckets, fc, statusField
   const L = [];
 
   L.push(`## Migration report${typeScope ? ` — ${typeScope} only` : ''} — ${label}`);
-  if (cols.length > 1) L.push(`_Combined across **${cols.length} collections** that hold this workspace's data._`);
+  if (primaryName) L.push(`_Breakdown from the \`${primaryName}\` collection (grouped by \`${statusField}\`)._`);
   if (typeScope) L.push(`_Counts are for **${typeScope}** only._`);
   L.push('');
 
@@ -601,6 +601,15 @@ router.post('/query', requireAuth, async (req, res) => {
           /process|conflict|progress|migrat|complet|pending|suspend|fail|queue|not[ _]?process|transferr|moved|\bdone\b|version|no[_ ]?message|resume|skip|success|error|retry/i.test(String(s.value)));
         const migrationOnly = withData.filter(c => looksMigration(c.statusValues));
         if (migrationOnly.length) withData = migrationOnly;   // drop non-migration noise
+        // Order so the AUTHORITATIVE collection is first: prefer a `processStatus`
+        // field (the standard migration status the user validates in Metabase),
+        // then the richest by matches. withData[0] becomes the single collection
+        // whose breakdown we report (no cross-collection merge / mixed statuses).
+        withData.sort((a, b) => {
+          const ap = /^process_?status$/i.test(a.statusField) ? 1 : 0;
+          const bp = /^process_?status$/i.test(b.statusField) ? 1 : 0;
+          return bp - ap || b.total - a.total;
+        });
         if (withData.length) {
           // Pass 2 — timeline (for the ETA) + files/folders split, but only for the
           // few BIGGEST collections (they drive the rate and the type split), and
@@ -632,27 +641,21 @@ router.post('/query', requireAuth, async (req, res) => {
             }
             await Promise.all(jobs);
           });
-          // MERGE status counts across ALL collections that hold this workspace.
-          const mergedMap = new Map();
-          for (const c of withData) for (const s of c.statusValues) mergedMap.set(String(s.value), (mergedMap.get(String(s.value)) || 0) + s.count);
-          const mergedStatusValues = [...mergedMap].map(([value, count]) => ({ value, count }));
-          const buckets = classifyForecastCounts(mergedStatusValues);
-          const statusRows = withPercentages(mergedStatusValues);
+          const pick = withData[0];
+          const statusValues = pick.statusValues;
+          const buckets = classifyForecastCounts(statusValues);
+          const statusRows = withPercentages(statusValues);
+          const primaryQueryStr = pick.queryStr;
 
-          // Merge the processing timeline across collections (global earliest/latest).
-          let firstMs = null, lastMs = null, timeField = null;
-          for (const c of withData) {
-            if (c.firstMs != null) { firstMs = firstMs == null ? c.firstMs : Math.min(firstMs, c.firstMs); timeField = timeField || c.timeFieldName; }
-            if (c.lastMs != null) lastMs = lastMs == null ? c.lastMs : Math.max(lastMs, c.lastMs);
-          }
-          // Files/folders split summed across collections that distinguish them.
+          // Timeline + files/folders come from the SAME authoritative collection.
+          const firstMs = pick.firstMs ?? null, lastMs = pick.lastMs ?? null;
+          const timeField = pick.timeFieldName || null;
           let fileFolder = null;
-          if (!typeScope && withData.some(c => c.hasFolder)) {
-            fileFolder = { files: 0, folders: 0 };
-            for (const c of withData) { if (c.hasFolder) { fileFolder.files += c.files; fileFolder.folders += c.folders; } }
-          }
+          if (!typeScope && pick.hasFolder) fileFolder = { files: pick.files || 0, folders: pick.folders || 0 };
 
           const fc = computeForecast({ processed: buckets.processed, remaining: buckets.remaining, firstMs, lastMs, nowMs: Date.now() });
+          // Other collections that also have this workspace's data — listed for
+          // transparency (NOT merged into the breakdown above).
           const perCollection = withData.map(c => ({ name: c.name, total: c.total, buckets: classifyForecastCounts(c.statusValues) }));
 
           // PROGRESS DELTA: remember this report's numbers keyed by
@@ -664,19 +667,21 @@ router.post('/query', requireAuth, async (req, res) => {
           const nowIso = new Date().toISOString();
 
           const answer = buildReportAnswer({
-            filter: filter || { type: 'server', value: schema.name }, statusRows, buckets, fc, statusField: withData[0].statusField,
-            perCollection, timeField, fileFolder, queryStr: withData[0].queryStr, typeScope, dbName: schema.name,
-            prev: prevSnap, nowIso
+            filter: filter || { type: 'server', value: schema.name }, statusRows, buckets, fc, statusField: pick.statusField,
+            perCollection, timeField, fileFolder, queryStr: primaryQueryStr, typeScope, dbName: schema.name,
+            primaryName: pick.name, prev: prevSnap, nowIso
           });
           saveReportSnapshot(snapKey, { buckets, total: buckets.total }, nowIso);
-          console.log(`[Report] ${withData.length} collections merged: total=${buckets.total} processed=${buckets.processed} remaining=${buckets.remaining} eta_ok=${fc.ok}`);
+          console.log(`[Report] primary=${pick.name} (${withData.length} with data): total=${buckets.total} processed=${buckets.processed} conflict=${buckets.conflict} eta_ok=${fc.ok}`);
           return res.json({
             answer, mode: 'ai', query_type: 'report',
-            sql: withData[0].queryStr, is_mongo: true, collection: withData[0].name,
+            sql: primaryQueryStr, is_mongo: true, collection: pick.name,
             tables_used: withData.map(c => c.name),
-            // EVERY query that actually ran — so users can validate each in the UI.
-            queries: withData.map(c => ({ collection: c.name, query: c.queryStr })),
-            results: { cols: [{ name: withData[0].statusField }, { name: 'count' }], rows: mergedStatusValues.sort((a, b) => b.count - a.count).map(s => [s.value, s.count]), row_count: mergedStatusValues.length }
+            // The query behind the breakdown shown (Metabase-style) so users can
+            // copy it and validate; other collections with data are listed in the
+            // answer's "By collection" section.
+            queries: [{ collection: pick.name, query: primaryQueryStr }],
+            results: { cols: [{ name: pick.statusField }, { name: 'count' }], rows: [...statusValues].sort((a, b) => b.count - a.count).map(s => [s.value, s.count]), row_count: statusValues.length }
           });
         }
       } catch (e) {

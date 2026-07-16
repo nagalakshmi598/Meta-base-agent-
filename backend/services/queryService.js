@@ -93,11 +93,12 @@ export const CONTENT_GROUPS = {
     /^contact.?picking.?queue$/i, /^contact.?move.?queue$/i, /^contact.?folder.?info$/i,
     /^contacts?.?info$/i, /^contacts?.?folders?.?info$/i,
   ],
-  // Message/chat migration — the per-MESSAGE detail collection holds the real
-  // volume + status (MESSAGE_STATUS). We use just this one (not the workspace/job
-  // summaries) so counts aren't double-counted across granularities.
+  // Message/chat migration — MessageWorkSpace is the authoritative per-item
+  // collection whose `processStatus` holds the real migrated/conflict/… counts
+  // (validated against Metabase). MessageEachFiles is the fallback.
   message: [
-    /^(cf)?message.?each.?files$/i,   // MessageEachFiles / CFMessageEachFiles
+    /^messageworkspace$/i,
+    /^(cf)?message.?each.?files$/i,
   ],
 };
 export const CONTENT_COLLECTION_PATTERNS = [].concat(...Object.values(CONTENT_GROUPS));
