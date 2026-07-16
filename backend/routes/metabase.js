@@ -1,6 +1,6 @@
 import express from 'express';
 import { getClientFromSession } from '../services/metabaseService.js';
-import { setScanData, setCatalog, setScanProgress, getScanProgress, pickStatusFieldName, userRecentlyActive, hasScanData } from '../services/queryService.js';
+import { setScanData, setCatalog, setScanProgress, getScanProgress, pickStatusFieldName, userRecentlyActive, hasScanData, markUserActivity } from '../services/queryService.js';
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -15,6 +15,7 @@ const requireAuth = (req, res, next) => {
 
 router.get('/databases', requireAuth, async (req, res) => {
   try {
+    markUserActivity(); // pause the background scan so this returns fast
     const { client, token } = getClientFromSession(req.session);
     const data = await client.get(token, '/api/database', { include: 'tables' });
     res.json(data);
@@ -26,6 +27,9 @@ router.get('/databases', requireAuth, async (req, res) => {
 
 router.get('/databases/:id/metadata', requireAuth, async (req, res) => {
   try {
+    // Loading a database's schema — pause the background scan so Metabase isn't
+    // saturated and the schema returns quickly.
+    markUserActivity();
     const { client, token } = getClientFromSession(req.session);
     const data = await client.get(token, `/api/database/${req.params.id}/metadata`, {
       include_hidden: true
@@ -55,6 +59,7 @@ router.post('/dataset', requireAuth, async (req, res) => {
   }
 
   try {
+    markUserActivity(); // pause the background scan while a direct query runs
     const { client, token } = getClientFromSession(req.session);
     const data = await client.post(token, '/api/dataset', {
       type: 'native',
