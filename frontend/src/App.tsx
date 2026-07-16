@@ -36,8 +36,6 @@ export default function App() {
   const [scanStatus, setScanStatus] = useState<'idle' | 'scanning' | 'ready'>('idle');
   const [scanCount, setScanCount] = useState(0);
   const [questionToFill, setQuestionToFill] = useState('');
-  const [deepScanStatus, setDeepScanStatus] = useState<'idle' | 'scanning' | 'done'>('idle');
-  const [deepScanInfo, setDeepScanInfo] = useState('');
 
   // Chat persistence + sharing
   const [currentChatId, setCurrentChatId] = useState<string | null>(null);
@@ -47,35 +45,9 @@ export default function App() {
   const [chatOwner, setChatOwner] = useState<string>('');
   const [pendingSharedToken, setPendingSharedToken] = useState<string | null>(null);
 
-  const handleScanAll = useCallback(async () => {
-    setDeepScanStatus('scanning');
-    setDeepScanInfo('');
-    try {
-      await metabaseApi.scanAllDatabases(); // returns immediately; runs in background
-      // Poll progress every 4s until done
-      const poll = async () => {
-        try {
-          const s = await metabaseApi.scanAllStatus();
-          if (s.status === 'scanning') {
-            setDeepScanInfo(`Scanning ${s.dbDone}/${s.dbTotal} databases · ${s.collectionsScanned} collections learned${s.currentDb ? ` · ${s.currentDb}` : ''}`);
-            setTimeout(poll, 4000);
-          } else if (s.status === 'done') {
-            setDeepScanInfo(`Learned ${s.collectionsScanned} collections across ${s.dbDone}/${s.dbTotal} databases`);
-            setDeepScanStatus('done');
-          } else if (s.status === 'error') {
-            setDeepScanStatus('idle');
-          } else {
-            setTimeout(poll, 4000);
-          }
-        } catch {
-          setTimeout(poll, 6000);
-        }
-      };
-      setTimeout(poll, 3000);
-    } catch {
-      setDeepScanStatus('idle');
-    }
-  }, []);
+  // NOTE: We intentionally do NOT scan all servers. Collections are read per
+  // SELECTED server (see handleSelectDatabase) — switching servers reads that
+  // server's collections. This keeps Metabase responsive and answers fast.
 
   // Register session-expiry handler so any 401 auto-opens connect modal
   useEffect(() => {
@@ -290,9 +262,6 @@ export default function App() {
           aiEnabled={aiEnabled}
           scanStatus={scanStatus}
           scanCount={scanCount}
-          deepScanStatus={deepScanStatus}
-          deepScanInfo={deepScanInfo}
-          onScanAll={handleScanAll}
           onSelectDatabase={handleSelectDatabase}
           onDisconnect={handleDisconnect}
           onShowConnect={() => setShowConnect(true)}

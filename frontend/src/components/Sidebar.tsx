@@ -17,9 +17,6 @@ interface Props {
   aiEnabled: boolean;
   scanStatus: 'idle' | 'scanning' | 'ready';
   scanCount: number;
-  deepScanStatus: 'idle' | 'scanning' | 'done';
-  deepScanInfo: string;
-  onScanAll: () => void;
   onSelectDatabase: (db: DB) => void;
   onDisconnect: () => void;
   onShowConnect: () => void;
@@ -126,7 +123,6 @@ function TableRow({ table }: { table: Table }) {
 export default function Sidebar({
   open, connection, databases, selectedDb, schema, schemaLoading,
   suggestions, aiEnabled, scanStatus, scanCount,
-  deepScanStatus, deepScanInfo, onScanAll,
   onSelectDatabase, onDisconnect, onToggle, onUseSuggestion
 }: Props) {
   const [activeTab, setActiveTab] = useState<'schema' | 'suggestions'>('schema');
@@ -253,30 +249,6 @@ export default function Sidebar({
           {scanStatus === 'ready' && scanCount > 0 && (
             <div className="mx-2 mt-2 flex items-center gap-2 rounded-md bg-green-50 border border-green-200 px-3 py-1.5">
               <span className="text-xs text-green-700">✓ Learned {scanCount} collections</span>
-            </div>
-          )}
-
-          {/* Deep-learn ALL servers */}
-          {aiEnabled && (
-            <div className="mx-2 mt-2">
-              {deepScanStatus === 'scanning' ? (
-                <div className="flex items-start gap-2 rounded-md bg-[#0129ac]/8 border border-[#0129ac]/20 px-3 py-1.5">
-                  <Loader2 size={11} className="animate-spin text-[#0129ac] flex-shrink-0 mt-0.5" />
-                  <span className="text-xs text-[#0129ac] leading-snug">{deepScanInfo || 'Deep-learning all servers… (may take a while)'}</span>
-                </div>
-              ) : deepScanStatus === 'done' ? (
-                <div className="flex items-center gap-2 rounded-md bg-green-50 border border-green-200 px-3 py-1.5">
-                  <span className="text-xs text-green-700">✓ {deepScanInfo || 'All servers learned'}</span>
-                </div>
-              ) : (
-                <button
-                  onClick={onScanAll}
-                  title="Read sample data from every collection in every database"
-                  className="w-full flex items-center justify-center gap-1.5 rounded-md border border-[#0129ac]/30 text-[#0129ac] hover:bg-[#0129ac]/5 px-3 py-1.5 text-xs font-medium transition-colors"
-                >
-                  <Sparkles size={11} /> Deep-learn all servers
-                </button>
-              )}
             </div>
           )}
 
