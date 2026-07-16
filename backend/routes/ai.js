@@ -416,20 +416,27 @@ router.post('/query', requireAuth, async (req, res) => {
 
   // Run one native query against Metabase. Returns a normalized result and
   // retries once on a transient MongoDB "server selection" timeout.
-  const runNativeSafe = async (queryStr, collection) => {
+  const runNativeSafe = async (queryStr, collection, opts = {}) => {
     markUserActivity(); // tell the background scan to back off — user query in flight
     const body = {
       type: 'native',
       native: isMongo ? { query: queryStr, collection, template_tags: {} } : { query: queryStr, template_tags: {} },
       database: dbId
     };
-    // Up to 3 attempts with backoff — transient Mongo/Metabase timeouts (often
-    // from load) usually clear on retry.
-    const MAX = 3;
+    // `opts.timeoutMs` hard-caps EACH attempt (so one huge unindexed scan can't
+    // hang the request). `opts.retries` overrides the default 3 attempts.
+    const MAX = opts.retries ?? 3;
+    const timeoutMs = opts.timeoutMs;
+    const doPost = () => {
+      const call = mbClient.post(token, '/api/dataset', body);
+      if (!timeoutMs) return call;
+      call.catch(() => {}); // if the timeout wins the race, swallow the later rejection
+      return Promise.race([call, new Promise((_, rej) => setTimeout(() => rej(new Error('client-timeout')), timeoutMs))]);
+    };
     for (let attempt = 0; attempt < MAX; attempt++) {
       try {
         markUserActivity();
-        const r = await mbClient.post(token, '/api/dataset', body);
+        const r = await doPost();
         if (r?.error) {
           const msg = String(r.error);
           if (/tim(e|ed)\s*out|server that matches|UNKNOWN/i.test(msg) && attempt < MAX - 1) {
@@ -500,7 +507,7 @@ router.post('/query', requireAuth, async (req, res) => {
         if (filter && filter.type === 'id' && /^[0-9a-f]{24}$/i.test(filter.value) && !wantsAggregate) {
           const idCands = getTopCollections(question, schema, 12, scanData).map(t => enrichTableFields(t, scanData));
           const hits = await mapLimit(idCands, 6, async (cand) => {
-            const r = await runNativeSafe(JSON.stringify([{ '$match': { _id: { '$oid': filter.value } } }, { '$limit': 1 }]), cand.name);
+            const r = await runNativeSafe(JSON.stringify([{ '$match': { _id: { '$oid': filter.value } } }, { '$limit': 1 }]), cand.name, { timeoutMs: 12000, retries: 1 });
             return (r.ok && r.data?.rows?.length) ? { name: cand.name, data: r.data } : null;
           });
           const hit = hits.filter(Boolean)[0];
@@ -559,7 +566,9 @@ router.post('/query', requireAuth, async (req, res) => {
           const matchStage = typeFilter ? (hasId ? { '$and': [idMatch, typeFilter] } : typeFilter) : (hasId ? idMatch : null);
           const groupSort = [{ '$group': { '_id': `$${statusField}`, 'count': { '$sum': 1 } } }, { '$sort': { 'count': -1 } }];
           const pipeline = matchStage ? [{ '$match': matchStage }, ...groupSort] : groupSort;
-          const r = await runNativeSafe(JSON.stringify(pipeline), cand.name);
+          // Hard 30s cap per collection so one huge unindexed scan can't hang the
+          // whole report — a collection that exceeds it is simply skipped.
+          const r = await runNativeSafe(JSON.stringify(pipeline), cand.name, { timeoutMs: 30000, retries: 1 });
           if (!r.ok || !(r.data?.rows?.length)) return null;
           const statusValues = r.data.rows.map(row => ({ value: row[0], count: Number(row[row.length - 1]) || 0 }));
           const total = statusValues.reduce((a, s) => a + s.count, 0);
@@ -586,7 +595,7 @@ router.post('/query', requireAuth, async (req, res) => {
           await mapLimit(enrichTargets, 3, async (c) => {
             const jobs = [];
             if (c.timeFieldName) {
-              jobs.push(runNativeSafe(JSON.stringify([{ '$match': c.idMatch }, { '$group': { '_id': null, 'first': { '$min': `$${c.timeFieldName}` }, 'last': { '$max': `$${c.timeFieldName}` } } }]), c.name).then(tr => {
+              jobs.push(runNativeSafe(JSON.stringify([{ '$match': c.idMatch }, { '$group': { '_id': null, 'first': { '$min': `$${c.timeFieldName}` }, 'last': { '$max': `$${c.timeFieldName}` } } }]), c.name, { timeoutMs: 20000, retries: 1 }).then(tr => {
                 if (tr.ok && tr.data?.rows?.length) {
                   const cols = (tr.data.cols || []).map(x => x.name);
                   const row = tr.data.rows[0];
@@ -597,7 +606,7 @@ router.post('/query', requireAuth, async (req, res) => {
               }).catch(() => {}));
             }
             if (c.folderF && !typeScope) {
-              jobs.push(runNativeSafe(JSON.stringify([{ '$match': c.idMatch }, { '$group': { '_id': `$${c.folderF}`, 'count': { '$sum': 1 } } }]), c.name).then(fr => {
+              jobs.push(runNativeSafe(JSON.stringify([{ '$match': c.idMatch }, { '$group': { '_id': `$${c.folderF}`, 'count': { '$sum': 1 } } }]), c.name, { timeoutMs: 20000, retries: 1 }).then(fr => {
                 if (fr.ok && fr.data?.rows?.length) {
                   c.hasFolder = true; c.files = 0; c.folders = 0;
                   for (const row of fr.data.rows) {
